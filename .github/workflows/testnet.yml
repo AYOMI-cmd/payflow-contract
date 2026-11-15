@@ -22,7 +22,7 @@ jobs:
     name: deploy + demo
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup target add wasm32v1-none
       - uses: Swatinem/rust-cache@v2
       - uses: stellar/stellar-cli@v27.0.0
