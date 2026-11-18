@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: stellar/stellar-cli@v27.0.0
+      - uses: stellar/stellar-cli@v30.0.1
       - uses: actions/setup-node@v7
         with:
           node-version: 22

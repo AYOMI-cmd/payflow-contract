@@ -85,7 +85,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: rustup target add wasm32v1-none
-      - uses: stellar/stellar-cli@v27.0.0
+      - uses: stellar/stellar-cli@v30.0.1
       - run: stellar contract build
       - uses: actions/upload-artifact@v7
         with:
