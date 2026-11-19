@@ -201,6 +201,26 @@ fn withdraw_to_allows_the_user_to_name_themselves() {
 }
 
 #[test]
+fn withdraw_to_shares_the_operation_window() {
+    let h = setup();
+    let user = funded_user(&h, 100_000);
+    let destination = Address::generate(&h.env);
+
+    for _ in 0..4 {
+        h.vault.deposit(&user, &h.token, &1_000);
+        h.vault.withdraw_to(&user, &h.token, &destination, &500);
+    }
+    assert_eq!(h.vault.balance(&user, &h.token), 2_000);
+
+    assert_eq!(
+        h.vault.try_withdraw_to(&user, &h.token, &destination, &500),
+        Err(Ok(Error::RateLimitExceeded))
+    );
+    assert_eq!(h.vault.balance(&user, &h.token), 2_000);
+    assert_eq!(h.token_client.balance(&destination), 2_000);
+}
+
+#[test]
 fn withdraw_beyond_balance_fails() {
     let h = setup();
     let user = funded_user(&h, 10_000);
@@ -209,6 +229,41 @@ fn withdraw_beyond_balance_fails() {
         h.vault.try_withdraw(&user, &h.token, &1_001),
         Err(Ok(Error::InsufficientBalance))
     );
+}
+
+#[test]
+fn rapid_deposit_withdraw_cycling_is_rate_limited() {
+    let h = setup();
+    let user = funded_user(&h, 100_000);
+
+    // Eight operations fill one window: four deposit/withdraw round trips.
+    for _ in 0..4 {
+        h.vault.deposit(&user, &h.token, &1_000);
+        h.vault.withdraw(&user, &h.token, &500);
+    }
+    assert_eq!(h.vault.balance(&user, &h.token), 2_000);
+
+    // The ninth and tenth operations in the same window are rejected before
+    // any balance is touched, whichever direction they take.
+    assert_eq!(
+        h.vault.try_deposit(&user, &h.token, &1_000),
+        Err(Ok(Error::RateLimitExceeded))
+    );
+    assert_eq!(
+        h.vault.try_withdraw(&user, &h.token, &500),
+        Err(Ok(Error::RateLimitExceeded))
+    );
+    assert_eq!(h.vault.balance(&user, &h.token), 2_000);
+    assert_eq!(h.token_client.balance(&h.vault_id), 2_000);
+
+    // The bound is per (user, token), not global: another user is unaffected.
+    let other = funded_user(&h, 10_000);
+    h.vault.deposit(&other, &h.token, &1_000);
+
+    // Once the fixed window rolls over, operations are allowed again.
+    h.env.ledger().set_timestamp(VAULT_OPERATION_WINDOW_SECS);
+    h.vault.deposit(&user, &h.token, &1_000);
+    assert_eq!(h.vault.balance(&user, &h.token), 3_000);
 }
 
 #[test]
@@ -541,6 +596,12 @@ fn internal_balances_add_up_to_the_vault_holdings() {
     // 300 randomized steps: deposit, withdraw, or debit (a charge settlement).
     let mut rng = Rng::new(0x_1234_5678_9abc_def0);
     for _ in 0..300 {
+        // Move into the next operation window so the per-window cycling bound
+        // (#314) does not interfere with the accounting invariant under test.
+        let now = h.env.ledger().timestamp();
+        h.env
+            .ledger()
+            .set_timestamp(now + VAULT_OPERATION_WINDOW_SECS + 1);
         let i = rng.below(4) as usize;
         let user = users[i].clone();
 

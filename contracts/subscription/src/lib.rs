@@ -13,11 +13,11 @@
 //! | Entry point | Instance reads | Instance writes | Persistent reads | Persistent writes | Notes |
 //! |---|---|---|---|---|---|
 //! | `__constructor` | 0 | 6 (config keys) | 0 | 0 | Extends instance TTL |
-//! | `subscribe` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–5 (Mandate, 3 index slots, 1 count) | Extends instance + persistent TTLs |
-//! | `subscribe_at` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–5 (Mandate, 3 index slots, 1 count) | Extends instance + persistent TTLs |
-//! | `subscribe_with_deposit` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–5 (Mandate, 3 index slots, 1 count) | Plus vault deposit; extends TTLs |
-//! | `charge` | 4 (config) | 0 | 2–3 (Mandate, Vault balance) | 2–3 (Mandate, Vault balance) | Vault debit; extends persistent TTLs |
-//! | `upgrade` | 4 (config) | 0 | 2–3 (Mandate, Plan) | 2–3 (Mandate, index slots) | Extends persistent TTLs; vault debit if prorated |
+//! | `subscribe` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read; extends TTLs |
+//! | `subscribe_at` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read; extends TTLs |
+//! | `subscribe_with_deposit` | 4 (config) | 1 (NextMandateId) | 1 (Plan) | 4–6 (Mandate, 3 index slots, 1 count, optional grace) | Plus registry grace read and vault deposit; extends TTLs |
+//! | `charge` | 4 (config) | 0 | 2–4 (Mandate, Plan, Vault balance) | 2–3 (Mandate, Vault balance) | Vault debit; extends persistent TTLs |
+//! | `upgrade` | 4 (config) | 0 | 2–4 (Mandate, Plan, pause view) | 2–3 (Mandate, index slots) | Extends persistent TTLs; vault debit if prorated |
 //! | `cancel` / `cancel_with_reason` | 0 | 0 | 1 (Mandate) | 1–2 (Mandate, index) | Extends persistent TTL |
 //! | `cancel_page` | 0 | 0 | ≤100 (index + Mandates) | ≤50 (Mandates) | Page ≤50, extends persistent TTLs |
 //! | `propose_mandate_owner` | 0 | 0 | 1 (Mandate) | 2 (PendingOwner, Position) | Extends persistent TTLs |
@@ -30,8 +30,10 @@
 //! | `set_fee_bps` | 1 (Admin) | 1 (FeeBps) | 0 | 0 | Admin only, extends instance TTL |
 //! | `get_mandate` | 0 | 0 | 1 (Mandate) | 0 | |
 //! | `estimated_end` | 0 | 0 | 1 (Mandate) | 0 | |
-//! | `is_due` | 0 | 0 | 1 (Mandate) | 0 | |
-//! | `quote_charge` | 0 | 0 | 1 (Mandate) | 0 | |
+//! | `is_due` | 0 | 0 | 1–2 (Mandate, Plan) | 0 | |
+//! | `quote_charge` | 0 | 0 | 1–2 (Mandate, Plan) | 0 | |
+//! | `is_in_grace_period` | 0 | 0 | 1–2 (Mandate, MandateGracePeriod) | 0 | |
+//! | `mandate_grace_period` | 0 | 0 | 2 (Mandate, MandateGracePeriod) | 0 | |
 //! | `due_mandates` | 0 | 0 | ≤100 (index + Mandates) | 0 | Page ≤50 |
 //! | `committed_per_period` | 0 | 0 | ≤50 (index + Mandates) | 0 | Page ≤50 |
 //! | `subscriber_mandate_count` | 0 | 0 | 1 (count) | 0 | |
@@ -378,6 +380,12 @@ mod contract {
                 .get(&DataKey::NextMandateId)
                 .ok_or(Error::NotInitialized)?;
 
+            // Freeze the plan's current grace window into this mandate. The
+            // registry is the source of truth, and existing mandates never
+            // re-read it, so later plan edits cannot shorten a window an open
+            // mandate was promised (#312).
+            let grace_period_secs = Self::read_plan_grace_period(&env, &registry, plan_id)?;
+
             let fee_bps: u32 = env
                 .storage()
                 .instance()
@@ -422,6 +430,9 @@ mod contract {
             };
 
             Self::write_mandate(&env, &mandate);
+            if grace_period_secs != 0 {
+                Self::write_grace_period(&env, id, grace_period_secs);
+            }
             Self::index_push(
                 &env,
                 DataKey::SubscriberMandateCount(subscriber.clone()),
@@ -509,8 +520,9 @@ mod contract {
         /// Returns [`Error::MandateNotFound`] if the mandate does not exist,
         /// [`Error::MandateNotActive`] if the mandate is not active,
         /// [`Error::NotDue`] if the ledger timestamp is before `next_charge`,
-        /// [`Error::MaxChargesReached`] if the mandate reached its cap, or
-        /// [`Error::AmountOverflow`] if math overflows.
+        /// [`Error::MaxChargesReached`] if the mandate reached its cap,
+        /// [`Error::PlanChargesPaused`] if the plan's merchant paused charging,
+        /// or [`Error::AmountOverflow`] if math overflows.
         pub fn charge(env: Env, keeper: Address, mandate_id: u64) -> Result<ChargeResult, Error> {
             keeper.require_auth();
 
@@ -536,6 +548,9 @@ mod contract {
                 .ok_or(Error::AmountOverflow)?;
             if mandate.max_total != 0 && next_total > mandate.max_total {
                 return Err(Error::MaxChargesReached);
+            }
+            if Self::plan_charges_paused(&env, mandate.plan_id)? {
+                return Err(Error::PlanChargesPaused);
             }
 
             let (fee, tip, referral, merchant_amount) = Self::fee_split(&mandate)?;
@@ -716,6 +731,7 @@ mod contract {
         /// [`Error::MandateNotActive`] if it is not active,
         /// [`Error::NotDue`] if the ledger timestamp is before `next_charge`,
         /// [`Error::MaxChargesReached`] if it reached a cap,
+        /// [`Error::PlanChargesPaused`] if the plan's merchant paused charging,
         /// [`Error::ChargeWouldSucceed`] if the vault covers the charge, or
         /// [`Error::AmountOverflow`] if math overflows.
         pub fn flag_failed_charge(env: Env, mandate_id: u64) -> Result<bool, Error> {
@@ -740,6 +756,9 @@ mod contract {
                 .ok_or(Error::AmountOverflow)?;
             if mandate.max_total != 0 && next_total > mandate.max_total {
                 return Err(Error::MaxChargesReached);
+            }
+            if Self::plan_charges_paused(&env, mandate.plan_id)? {
+                return Err(Error::PlanChargesPaused);
             }
 
             // The subscriber is debited exactly `amount` across all legs, so
@@ -794,6 +813,40 @@ mod contract {
                 .get(&DataKey::FirstFailedCharge(mandate_id))
         }
 
+        /// Grace window in seconds frozen into `mandate_id` when it was opened
+        /// (#312). `0` means the plan had no grace window at sign-up.
+        ///
+        /// # Errors
+        /// Returns [`Error::MandateNotFound`] if the mandate does not exist.
+        pub fn mandate_grace_period(env: Env, mandate_id: u64) -> Result<u64, Error> {
+            let _ = Self::read_mandate(&env, mandate_id)?;
+            Ok(Self::read_grace_period(&env, mandate_id))
+        }
+
+        /// Whether `mandate_id` is inside the grace window it was opened with
+        /// (#312), so a wallet can warn the subscriber before the mandate
+        /// lapses.
+        ///
+        /// The window starts when the charge falls due (`next_charge`), not
+        /// when a keeper gets around to flagging the failure, and lasts for the
+        /// mandate's frozen grace window. A mandate with a zero window is never
+        /// in grace. Indefinitely paused, cancelled and completed mandates are
+        /// not in grace either; a scheduled pause that has run its course is
+        /// treated as active, matching `charge`.
+        ///
+        /// The window is inclusive of its start and exclusive of its end: at
+        /// exactly `next_charge + grace_period_secs` the grace period has
+        /// elapsed. This is a pure read: no storage writes and no events.
+        ///
+        /// # Errors
+        /// Returns [`Error::MandateNotFound`] if the mandate does not exist.
+        pub fn is_in_grace_period(env: Env, mandate_id: u64) -> Result<bool, Error> {
+            let mandate = Self::read_mandate(&env, mandate_id)?;
+            let grace_period_secs = Self::read_grace_period(&env, mandate_id);
+            let now = env.ledger().timestamp();
+            Ok(Self::in_grace_period_at(&mandate, grace_period_secs, now))
+        }
+
         /// Move a mandate onto a different plan.
         ///
         /// Moving to a more expensive plan collects the price difference for the
@@ -830,6 +883,7 @@ mod contract {
         /// [`Error::NotSubscriber`] if the caller is not the subscriber,
         /// [`Error::MandateNotActive`] if the mandate is not active,
         /// [`Error::PlanInactive`] if the new plan is inactive,
+        /// [`Error::PlanChargesPaused`] if the new plan has charging paused,
         /// [`Error::DifferentToken`] if the new plan is denominated in a different token,
         /// [`Error::DifferentMerchant`] if the new plan belongs to a different merchant, or
         /// [`Error::AmountOverflow`] if math overflows.
@@ -861,6 +915,9 @@ mod contract {
             }
             if plan.merchant != mandate.merchant {
                 return Err(Error::DifferentMerchant);
+            }
+            if Self::plan_charges_paused(&env, new_plan_id)? {
+                return Err(Error::PlanChargesPaused);
             }
 
             let old_plan_id = mandate.plan_id;
@@ -1567,7 +1624,10 @@ mod contract {
         /// check vault balance; a funded-ness check is the caller's job.
         pub fn is_due(env: Env, mandate_id: u64) -> Result<bool, Error> {
             let m = Self::read_mandate(&env, mandate_id)?;
-            Ok(Self::mandate_is_due(&m, env.ledger().timestamp()))
+            if !Self::mandate_is_due(&m, env.ledger().timestamp()) {
+                return Ok(false);
+            }
+            Ok(!Self::plan_charges_paused(&env, m.plan_id)?)
         }
 
         /// Read-only preview of what `charge` would pay right now.
@@ -1590,7 +1650,8 @@ mod contract {
             let chargeable = Self::active_at(&m, now)
                 && (m.max_charges == 0 || m.charges_made < m.max_charges)
                 && (m.max_total == 0 || m.total_spent.saturating_add(m.amount) <= m.max_total)
-                && now >= m.next_charge;
+                && now >= m.next_charge
+                && !Self::plan_charges_paused(&env, m.plan_id)?;
 
             Ok(ChargeQuote {
                 amount: m.amount,
@@ -1684,8 +1745,11 @@ mod contract {
         /// order. A keeper settling one merchant otherwise has to read every
         /// mandate the merchant has ever had and test each one itself.
         ///
-        /// Reads at most one page of index slots and their mandate entries,
-        /// and answers exactly what `is_due` would for each.
+        /// Reads at most one page of index slots and their mandate entries.
+        /// It cannot afford a plan-registry read per candidate within the
+        /// ledger's 100-entry budget, so it reports the mandates whose own
+        /// schedule is due; `is_due` and `charge` add the plan-pause check and
+        /// are the final authority before settlement (#315).
         pub fn due_mandates(env: Env, merchant: Address, start: u32, limit: u32) -> Vec<u64> {
             let end = start.saturating_add(limit.min(MAX_PAGE));
             let now = env.ledger().timestamp();
@@ -2034,9 +2098,38 @@ mod contract {
             Ok((fee, tip, referral, merchant_gross - tip - referral))
         }
 
-        /// Whether `charge` would settle this mandate at `now`: active,
-        /// inside both caps and past its next charge date. `is_due` and
-        /// `due_mandates` both answer from this, so they cannot disagree.
+        /// Whether the plan's merchant has paused charging for it (#315).
+        fn plan_charges_paused(env: &Env, plan_id: u64) -> Result<bool, Error> {
+            let registry: Address = Self::cfg_address(env, DataKey::PlanRegistry)?;
+            match PlanRegistryClient::new(env, &registry).try_plan_charges_paused(&plan_id) {
+                Ok(Ok(paused)) => Ok(paused),
+                _ => Err(Error::PlanNotFound),
+            }
+        }
+
+        fn read_plan_grace_period(
+            env: &Env,
+            registry: &Address,
+            plan_id: u64,
+        ) -> Result<u64, Error> {
+            match PlanRegistryClient::new(env, registry).try_plan_grace_period(&plan_id) {
+                Ok(Ok(seconds)) => Ok(seconds),
+                _ => Err(Error::PlanNotFound),
+            }
+        }
+
+        /// Grace state at `now`, using the window frozen into the mandate.
+        fn in_grace_period_at(m: &Mandate, grace_period_secs: u64, now: u64) -> bool {
+            if grace_period_secs == 0 || !Self::active_at(m, now) || now < m.next_charge {
+                return false;
+            }
+            now < m.next_charge.saturating_add(grace_period_secs)
+        }
+
+        /// Whether `charge` would settle this mandate at `now` from its own
+        /// terms: active, inside both caps and past its next charge date.
+        /// `is_due` adds the plan-pause check on top; `due_mandates` cannot
+        /// afford that cross-contract read and answers from these local terms.
         fn mandate_is_due(m: &Mandate, now: u64) -> bool {
             Self::active_at(m, now)
                 && (m.max_charges == 0 || m.charges_made < m.max_charges)
@@ -2105,6 +2198,21 @@ mod contract {
                 .persistent()
                 .get(&DataKey::Mandate(id))
                 .ok_or(Error::MandateNotFound)
+        }
+
+        fn read_grace_period(env: &Env, id: u64) -> u64 {
+            env.storage()
+                .persistent()
+                .get(&DataKey::MandateGracePeriod(id))
+                .unwrap_or(0)
+        }
+
+        fn write_grace_period(env: &Env, id: u64, grace_period_secs: u64) {
+            let key = DataKey::MandateGracePeriod(id);
+            env.storage().persistent().set(&key, &grace_period_secs);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERSIST_THRESHOLD, PERSIST_BUMP);
         }
 
         fn write_mandate(env: &Env, mandate: &Mandate) {
