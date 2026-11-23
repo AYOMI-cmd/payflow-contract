@@ -139,6 +139,8 @@ cross-contract calls (Subscription → PlanRegistry → Vault → token) for
 `subscribe`, `charge` and `cancel`, the errors each step can stop on, the
 events each flow emits, and what the protocol pause blocks.
 
+The complete numeric error reference is in [`docs/ERRORS.md`](docs/ERRORS.md), including the trigger condition for every contract error.
+
 ## Architecture decision records
 
 Settled design choices are written up as short ADRs (context, decision,
