@@ -43,6 +43,8 @@ pub struct Subscription;
 
 #[contractimpl]
 impl Subscription {
+    /// Bootstrap the contract. Callable once; subsequent calls return
+    /// `AlreadyInitialized`. `fee_bps` must not exceed `MAX_FEE_BPS` (1 000).
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -313,6 +315,8 @@ impl Subscription {
         Ok(())
     }
 
+    /// Return the mandate record for `mandate_id`. Errors with `MandateNotFound`
+    /// when the id does not exist.
     pub fn get_mandate(env: Env, mandate_id: u64) -> Result<Mandate, Error> {
         Self::read_mandate(&env, mandate_id)
     }
@@ -330,6 +334,8 @@ impl Subscription {
         Ok(env.ledger().timestamp() >= m.next_charge)
     }
 
+    /// Return all mandate ids opened by `subscriber`. Returns an empty list when
+    /// the subscriber has no mandates.
     pub fn subscriber_mandates(env: Env, subscriber: Address) -> Vec<u64> {
         env.storage()
             .persistent()
@@ -337,6 +343,8 @@ impl Subscription {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Return all mandate ids where `merchant` is the recipient. Returns an
+    /// empty list when the merchant has no mandates.
     pub fn merchant_mandates(env: Env, merchant: Address) -> Vec<u64> {
         env.storage()
             .persistent()
@@ -344,6 +352,7 @@ impl Subscription {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Return the current protocol fee in basis points.
     pub fn fee_bps(env: Env) -> Result<u32, Error> {
         env.storage()
             .instance()
@@ -351,14 +360,18 @@ impl Subscription {
             .ok_or(Error::NotInitialized)
     }
 
+    /// Return the current admin address.
     pub fn admin(env: Env) -> Result<Address, Error> {
         Self::cfg_address(&env, DataKey::Admin)
     }
 
+    /// Return the plan-registry contract address this subscription engine reads
+    /// plan definitions from.
     pub fn plan_registry(env: Env) -> Result<Address, Error> {
         Self::cfg_address(&env, DataKey::PlanRegistry)
     }
 
+    /// Return the vault contract address this subscription engine debits.
     pub fn vault(env: Env) -> Result<Address, Error> {
         Self::cfg_address(&env, DataKey::Vault)
     }

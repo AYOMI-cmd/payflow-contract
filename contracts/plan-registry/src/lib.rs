@@ -159,6 +159,8 @@ impl PlanRegistry {
         Ok(())
     }
 
+    /// Return the plan record for `plan_id`. Errors with `PlanNotFound` when
+    /// the id does not exist.
     pub fn get_plan(env: Env, plan_id: u64) -> Result<Plan, Error> {
         env.storage()
             .persistent()
@@ -166,6 +168,8 @@ impl PlanRegistry {
             .ok_or(Error::PlanNotFound)
     }
 
+    /// Return the list of plan ids published by `merchant`. Returns an empty
+    /// list when the merchant has not published any plans.
     pub fn merchant_plans(env: Env, merchant: Address) -> Vec<u64> {
         env.storage()
             .persistent()
@@ -173,6 +177,8 @@ impl PlanRegistry {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Return the current admin address. Errors with `NotInitialized` before
+    /// `initialize` has been called.
     pub fn admin(env: Env) -> Result<Address, Error> {
         env.storage()
             .instance()

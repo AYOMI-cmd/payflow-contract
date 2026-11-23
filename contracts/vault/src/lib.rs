@@ -31,6 +31,7 @@ pub struct Vault;
 
 #[contractimpl]
 impl Vault {
+    /// Set the admin. Callable once; subsequent calls return `AlreadyInitialized`.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
@@ -155,10 +156,14 @@ impl Vault {
         Ok(())
     }
 
+    /// Return the vault balance of `token` held on behalf of `user`.
     pub fn balance(env: Env, user: Address, token: Address) -> i128 {
         Self::read_balance(&env, &user, &token)
     }
 
+    /// Return the subscription contract address that is authorised to call
+    /// `debit`. Errors with `SubscriptionNotSet` until `set_subscription` has
+    /// been called.
     pub fn subscription(env: Env) -> Result<Address, Error> {
         env.storage()
             .instance()
@@ -166,6 +171,8 @@ impl Vault {
             .ok_or(Error::SubscriptionNotSet)
     }
 
+    /// Return the current admin address. Errors with `NotInitialized` before
+    /// `initialize` has been called.
     pub fn admin(env: Env) -> Result<Address, Error> {
         env.storage()
             .instance()
