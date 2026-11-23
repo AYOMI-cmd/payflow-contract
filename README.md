@@ -116,6 +116,9 @@ The script deploys in dependency order, initializes each contract, grants the
 subscription contract debit rights on the vault, and prints a ready-to-paste
 env block.
 
+For a full step-by-step walkthrough including prerequisites, smoke-testing,
+and troubleshooting, see [docs/testnet-quickstart.md](docs/testnet-quickstart.md).
+
 Smoke-test a live deployment end to end:
 
 ```bash
