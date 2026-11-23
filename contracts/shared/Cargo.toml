@@ -1,0 +1,18 @@
+[package]
+name = "payflow-shared"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+publish = false
+
+[lib]
+name = "payflow_shared"
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[lints]
+workspace = true
