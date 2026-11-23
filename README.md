@@ -219,6 +219,9 @@ Upgrade a deployed suite to new wasm (admin-signed; storage is preserved):
 ./scripts/upgrade.sh subscription testnet payflow-deployer
 ```
 
+For a full step-by-step walkthrough including prerequisites, smoke-testing,
+and troubleshooting, see [docs/testnet-quickstart.md](docs/testnet-quickstart.md).
+
 Smoke-test a live deployment end to end:
 
 ```bash

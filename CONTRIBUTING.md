@@ -33,17 +33,12 @@ A PR cannot merge unless all CI jobs pass:
 | `msrv` | `cargo check --all --all-targets` (on Rust 1.91.0) |
 | `build-wasm` | `stellar contract build` |
 
-Install [just](https://just.systems/) to run the same four checks locally:
+Run all four locally before pushing. `RUSTFLAGS="-D warnings"` is set
+globally in CI, so any new warning will fail the build — fix warnings
+before pushing.
 
-```bash
-just check
-```
-
-The `check` recipe runs formatting, clippy, tests, and the wasm build. You can
-also run `just build` by itself. For deployment and the end-to-end smoke test,
-use `just deploy <network> <identity>` and `just demo <network>` respectively.
-Deployment defaults to the `testnet` network and the `payflow-deployer`
-identity; the demo defaults to `testnet`.
+A separate `audit.yml` workflow runs `cargo audit` on a weekly schedule and
+opens an issue automatically when a new advisory affects the dependency tree.
 
 ## Code standards
 
@@ -58,6 +53,10 @@ identity; the demo defaults to `testnet`.
   `env.events().publish` tuple form. Indexers depend on the typed shape.
 - **Auth.** State exactly whose `require_auth()` is required in the doc comment
   of any function that mutates state.
+- **Doc comments.** Every `pub fn` in `#[contractimpl]` must have a `///` doc
+  comment. soroban-sdk embeds these in the contract spec; the Stellar CLI then
+  carries them into the generated TypeScript bindings as JSDoc. Use
+  `./scripts/gen-bindings.sh` to regenerate bindings after any interface change.
 - **File layout.** Keep the `lib.rs` / `types.rs` / `error.rs` / `events.rs` /
   `test.rs` split.
 
