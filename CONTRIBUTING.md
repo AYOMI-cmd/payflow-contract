@@ -30,7 +30,12 @@ A PR cannot merge unless all four jobs pass:
 | `test` | `cargo test --all` |
 | `build-wasm` | `stellar contract build` |
 
-Run all four locally before pushing.
+Run all four locally before pushing. `RUSTFLAGS="-D warnings"` is set
+globally in CI, so any new warning will fail the build — fix warnings
+before pushing.
+
+A separate `audit.yml` workflow runs `cargo audit` on a weekly schedule and
+opens an issue automatically when a new advisory affects the dependency tree.
 
 ## Code standards
 
@@ -45,6 +50,10 @@ Run all four locally before pushing.
   `env.events().publish` tuple form. Indexers depend on the typed shape.
 - **Auth.** State exactly whose `require_auth()` is required in the doc comment
   of any function that mutates state.
+- **Doc comments.** Every `pub fn` in `#[contractimpl]` must have a `///` doc
+  comment. soroban-sdk embeds these in the contract spec; the Stellar CLI then
+  carries them into the generated TypeScript bindings as JSDoc. Use
+  `./scripts/gen-bindings.sh` to regenerate bindings after any interface change.
 - **File layout.** Keep the `lib.rs` / `types.rs` / `error.rs` / `events.rs` /
   `test.rs` split.
 
