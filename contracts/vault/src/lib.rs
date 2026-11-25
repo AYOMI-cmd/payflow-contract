@@ -76,6 +76,12 @@ const INSTANCE_THRESHOLD: u32 = INSTANCE_BUMP - DAY_IN_LEDGERS;
 const PERSIST_BUMP: u32 = 90 * DAY_IN_LEDGERS;
 const PERSIST_THRESHOLD: u32 = PERSIST_BUMP - DAY_IN_LEDGERS;
 
+/// The all-zero account and contract strkeys (#236). Both are well-formed
+/// Stellar addresses, but neither can ever sign or hold a deployed contract,
+/// so tokens sent there are irretrievable.
+const ZERO_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+const ZERO_CONTRACT: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+
 /// Length of the fixed window that bounds repeated deposit/withdraw cycling
 /// (#314). Windows are aligned to the Unix epoch, so every caller sees the
 /// same boundaries and a fresh window cannot be opened by waiting less than
@@ -96,7 +102,7 @@ mod contract {
         DataKey, Debit, Deposit, DepositCapSet, DepositFor, Env, Error, OperationWindow,
         ReserveSet, SpendLimit, SpendWindow, String, UpgradeRecord, Withdraw, WithdrawTo,
         INSTANCE_BUMP, INSTANCE_THRESHOLD, MAX_VAULT_OPERATIONS_PER_WINDOW, PERSIST_BUMP,
-        PERSIST_THRESHOLD, VAULT_OPERATION_WINDOW_SECS,
+        PERSIST_THRESHOLD, VAULT_OPERATION_WINDOW_SECS, ZERO_ACCOUNT, ZERO_CONTRACT,
     };
 
     /// Custody for subscriber funds.
@@ -372,7 +378,8 @@ mod contract {
         /// # Errors
         /// Returns [`Error::InvalidAmount`] if `amount <= 0`,
         /// [`Error::InsufficientBalance`] if `amount` exceeds the user's
-        /// unreserved balance, or [`Error::RateLimitExceeded`] if the
+        /// unreserved balance, [`Error::ZeroAddress`] if `user` is the zero
+        /// address (#236), or [`Error::RateLimitExceeded`] if the
         /// (user, token) pair has used its deposit/withdraw budget for this
         /// window (#314).
         pub fn withdraw(
@@ -382,6 +389,7 @@ mod contract {
             amount: i128,
         ) -> Result<(), Error> {
             user.require_auth();
+            Self::require_recipient(&env, &user)?;
             let new_balance = Self::do_withdraw(&env, &user, &token, amount)?;
 
             Self::transfer_out(&env, &token, &user, amount)?;
@@ -417,7 +425,8 @@ mod contract {
         /// # Errors
         /// Returns [`Error::InvalidAmount`] if `amount <= 0`,
         /// [`Error::InsufficientBalance`] if `amount` exceeds the user's
-        /// unreserved balance, or [`Error::RateLimitExceeded`] if the
+        /// unreserved balance, [`Error::ZeroAddress`] if `to` is the zero
+        /// address (#236), or [`Error::RateLimitExceeded`] if the
         /// (user, token) pair has used its deposit/withdraw budget for this
         /// window (#314).
         pub fn withdraw_to(
@@ -428,6 +437,7 @@ mod contract {
             amount: i128,
         ) -> Result<(), Error> {
             user.require_auth();
+            Self::require_recipient(&env, &to)?;
             let new_balance = Self::do_withdraw(&env, &user, &token, amount)?;
 
             Self::transfer_out(&env, &token, &to, amount)?;
@@ -464,11 +474,13 @@ mod contract {
         ///
         /// # Errors
         /// Never fails on the balance itself: an empty balance returns `0`
-        /// without a token transfer. Returns [`Error::RateLimitExceeded`] if the
+        /// without a token transfer. Returns [`Error::ZeroAddress`] if `user`
+        /// is the zero address (#236), and [`Error::RateLimitExceeded`] if the
         /// (user, token) pair has used its deposit/withdraw budget for this
         /// window (#314).
         pub fn withdraw_all(env: Env, user: Address, token: Address) -> Result<i128, Error> {
             user.require_auth();
+            Self::require_recipient(&env, &user)?;
 
             let balance = Self::read_balance(&env, &user, &token);
             let reserved = Self::read_reserved_total(&env, &user, &token);
@@ -949,6 +961,17 @@ mod contract {
     }
 
     impl Vault {
+        /// Reject an unset transfer destination before any balance is written
+        /// or any token is moved (#236).
+        fn require_recipient(env: &Env, to: &Address) -> Result<(), Error> {
+            if to == &Address::from_str(env, ZERO_ACCOUNT)
+                || to == &Address::from_str(env, ZERO_CONTRACT)
+            {
+                return Err(Error::ZeroAddress);
+            }
+            Ok(())
+        }
+
         /// Move `amount` from `from` into the vault only if the vault's token
         /// balance grows by exactly `amount`. Returns
         /// [`Error::UnexpectedTransferAmount`] otherwise (a fee-on-transfer
@@ -1006,6 +1029,7 @@ mod contract {
             amount: i128,
         ) -> Result<(), Error> {
             Self::require_subscription(env)?;
+            Self::require_recipient(env, to)?;
 
             if amount <= 0 {
                 return Err(Error::InvalidAmount);
@@ -1038,6 +1062,8 @@ mod contract {
             amount_b: i128,
         ) -> Result<(), Error> {
             Self::require_subscription(env)?;
+            Self::require_recipient(env, to_a)?;
+            Self::require_recipient(env, to_b)?;
 
             if amount_a <= 0 || amount_b < 0 {
                 return Err(Error::InvalidAmount);
@@ -1101,11 +1127,12 @@ mod contract {
                 return Err(Error::InvalidAmount);
             }
 
-            for i in 1..legs.len() {
+            for i in 0..legs.len() {
                 let leg = legs.get_unchecked(i);
                 if leg.1 < 0 {
                     return Err(Error::InvalidAmount);
                 }
+                Self::require_recipient(env, &leg.0)?;
             }
 
             // Sum all amounts and check against spendable balance and spend limit once.

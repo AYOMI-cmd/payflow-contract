@@ -82,7 +82,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 2039 | `ProtocolPaused` | Protocol-wide operations are paused. |
 | 2040 | `UnexpectedTransferAmount` | A refund transfer did not deliver the exact amount (for example a fee-on-transfer token); the refund is rolled back. |
 
-## Vault (3001–3016)
+## Vault (3001–3017)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -102,5 +102,6 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 3014 | `ReserveExceedsBalance` | The requested reserve is greater than the available balance. |
 | 3015 | `RateLimitExceeded` | The operation exceeds the configured rate limit. |
 | 3016 | `UnexpectedTransferAmount` | A token transfer did not move the exact amount (for example a fee-on-transfer token); the operation is rolled back. |
+| 3017 | `ZeroAddress` | A withdrawal or payout destination is the zero/unset account or contract address. |
 
 When adding a new error, append it to the relevant enum and update this catalog in the same change. Clients should match on the numeric code and handle unknown future codes gracefully.
