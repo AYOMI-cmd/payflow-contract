@@ -8,7 +8,7 @@ This page is the integration reference for the errors returned by the contracts 
 
 The Rust enums remain the source of truth: [plan-registry errors](../contracts/plan-registry/src/error.rs), [subscription errors](../contracts/subscription/src/error.rs), and [vault errors](../contracts/vault/src/error.rs). Error variants are append-only so existing client mappings remain stable.
 
-## Plan registry (1001–1024)
+## Plan registry (1001–1025)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -25,7 +25,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 1011 | `KeeperBpsTooHigh` | Keeper basis points exceed the configured maximum. |
 | 1012 | `SuccessorNotFound` | The proposed successor profile cannot be found. |
 | 1013 | `SelfSuccessor` | The owner attempted to set itself as successor. |
-| 1014 | `SuccessorTokenMismatch` | The successor uses a different token. |
+| 1014 | `SuccessorTokenMismatch` | The plans have no accepted token in common. |
 | 1015 | `DescriptionTooLong` | A plan description exceeds the maximum length. |
 | 1016 | `PlanNameTooLong` | A plan name exceeds the maximum length. |
 | 1017 | `UriTooLong` | A plan URI exceeds the maximum length. |
@@ -36,8 +36,9 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 1022 | `EmptyBatch` | A batch operation was submitted without items. |
 | 1023 | `BatchTooLarge` | A batch exceeds the contract's maximum size. |
 | 1024 | `PlanIdOverflow` | The next plan ID would exceed `u64`; no plan is written. |
+| 1025 | `InvalidAcceptedTokens` | A plan has no accepted tokens or lists the same token more than once. |
 
-## Subscription (2001–2040)
+## Subscription (2001–2041)
 
 | Code | Variant | Returned when |
 | --- | --- | --- |
@@ -81,6 +82,7 @@ The Rust enums remain the source of truth: [plan-registry errors](../contracts/p
 | 2038 | `PlanChargesPaused` | Charges are paused for the referenced plan. |
 | 2039 | `ProtocolPaused` | Protocol-wide operations are paused. |
 | 2040 | `UnexpectedTransferAmount` | A refund transfer did not deliver the exact amount (for example a fee-on-transfer token); the refund is rolled back. |
+| 2041 | `TokenNotAccepted` | The selected token is not on the plan's accepted-token list. |
 
 ## Vault (3001–3017)
 

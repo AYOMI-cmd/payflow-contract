@@ -184,7 +184,17 @@ export const Error = {
    * and plan upgrades are refused until it is resumed; reads,
    * cancellations, refunds and vault withdrawals are unaffected.
    */
-  2039 : { message: "ProtocolPaused" }
+  2039 : { message: "ProtocolPaused" },
+  /**
+   * A refund transfer did not deliver exactly the recorded refund amount,
+   * so the token is unsafe for exact-amount accounting (for example a
+   * fee-on-transfer token). The refund is rolled back.
+   */
+  2040 : { message: "UnexpectedTransferAmount" },
+  /**
+   * The selected token is not accepted by the requested plan.
+   */
+  2041 : { message: "TokenNotAccepted" }
 }
 
 /**

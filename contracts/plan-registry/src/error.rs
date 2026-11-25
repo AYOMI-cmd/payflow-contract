@@ -34,8 +34,8 @@ pub enum Error {
     SuccessorNotFound = 1012,
     /// A plan cannot be its own successor.
     SelfSuccessor = 1013,
-    /// The replacement plan is denominated in a different token than the plan
-    /// it replaces, so the pointer would be meaningless.
+    /// The replacement plan has no accepted token in common with the plan it
+    /// replaces, so a subscriber cannot carry its mandate token to it.
     SuccessorTokenMismatch = 1014,
     /// `create_plan` was given a description longer than
     /// `MAX_DESCRIPTION_LEN` bytes.
@@ -61,6 +61,9 @@ pub enum Error {
     /// The next plan ID cannot be represented: the counter is at `u64::MAX`,
     /// or a batch would carry it past `u64::MAX`. No plan is written.
     PlanIdOverflow = 1024,
+    /// `create_plan` was given no accepted tokens or listed a token more than
+    /// once.
+    InvalidAcceptedTokens = 1025,
 }
 
 impl From<Error> for ErrorCode {

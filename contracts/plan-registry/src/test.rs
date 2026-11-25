@@ -25,7 +25,7 @@ fn setup() -> (Env, PlanRegistryClient<'static>, Address) {
 
 fn batch_plan(env: &Env, token: &Address, amount: i128, name: &str) -> PlanParams {
     PlanParams {
-        token: token.clone(),
+        accepted_tokens: soroban_sdk::vec![env, token.clone()],
         amount,
         period: 2_592_000,
         name: String::from_str(env, name),
@@ -63,7 +63,7 @@ fn create_plan_assigns_sequential_ids() {
 
     let a = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
@@ -78,7 +78,7 @@ fn create_plan_assigns_sequential_ids() {
     );
     let b = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &2_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
@@ -110,6 +110,7 @@ fn create_plan_authorizes_exact_merchant_tree() {
     let client = PlanRegistryClient::new(&env, &id);
     let merchant = Address::generate(&env);
     let token = Address::generate(&env);
+    let accepted_tokens = soroban_sdk::vec![&env, token.clone()];
     let name = String::from_str(&env, "Pro Monthly");
     let desc = String::from_str(&env, "");
 
@@ -120,7 +121,7 @@ fn create_plan_authorizes_exact_merchant_tree() {
             fn_name: "create_plan",
             args: (
                 &merchant,
-                &token,
+                &accepted_tokens,
                 &1_000_i128,
                 &604_800_u64,
                 &name,
@@ -139,7 +140,7 @@ fn create_plan_authorizes_exact_merchant_tree() {
     }]);
     client.create_plan(
         &merchant,
-        &token,
+        &accepted_tokens,
         &1_000,
         &604_800,
         &name,
@@ -162,7 +163,7 @@ fn create_plan_authorizes_exact_merchant_tree() {
                     soroban_sdk::Symbol::new(&env, "create_plan"),
                     (
                         &merchant,
-                        &token,
+                        &accepted_tokens,
                         &1_000_i128,
                         &604_800_u64,
                         &name,
@@ -218,7 +219,7 @@ fn create_plan_rejects_a_wrong_signer() {
     assert!(client
         .try_create_plan(
             &merchant,
-            &token,
+            &soroban_sdk::vec![&env, token.clone()],
             &1_000,
             &604_800,
             &name,
@@ -242,7 +243,7 @@ fn create_plan_stores_fields() {
 
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &5_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -258,7 +259,7 @@ fn create_plan_stores_fields() {
     let plan = client.get_plan(&id);
 
     assert_eq!(plan.merchant, merchant);
-    assert_eq!(plan.token, token);
+    assert_eq!(plan.accepted_tokens, soroban_sdk::vec![&env, token]);
     assert_eq!(plan.amount, 5_000);
     assert_eq!(plan.period, 604_800);
     assert!(plan.active);
@@ -273,7 +274,7 @@ fn create_plan_stores_the_keeper_tip() {
 
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -298,7 +299,7 @@ fn create_plan_rejects_a_keeper_tip_above_the_cap() {
 
     let res = client.try_create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -323,7 +324,7 @@ fn create_plan_rejects_zero_amount() {
     let token = Address::generate(&env);
     let res = client.try_create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &0,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -346,7 +347,7 @@ fn create_plan_rejects_negative_amount() {
     let token = Address::generate(&env);
     let res = client.try_create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &-1,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -369,7 +370,7 @@ fn create_plan_rejects_sub_minimum_period() {
     let token = Address::generate(&env);
     let res = client.try_create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &(MIN_PERIOD - 1),
         &String::from_str(&env, "Pro Monthly"),
@@ -398,7 +399,7 @@ fn set_plan_active_toggles() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -430,7 +431,7 @@ fn set_plan_active_authorizes_exact_merchant_tree() {
     env.mock_all_auths();
     let plan = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -492,7 +493,7 @@ fn set_plan_active_rejects_non_owner() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -517,7 +518,7 @@ fn set_plan_charges_paused_toggles_without_deactivating() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -552,7 +553,7 @@ fn set_plan_charges_paused_rejects_a_non_owner_and_missing_plan() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -588,7 +589,7 @@ fn set_plan_charges_paused_emits_the_change() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -620,7 +621,7 @@ fn set_plan_grace_period_is_stored_and_defaults_to_zero() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -661,7 +662,7 @@ fn set_plan_charges_paused_requires_the_merchants_auth() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
@@ -688,7 +689,7 @@ fn set_plan_paused_requires_the_merchants_auth() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
@@ -713,7 +714,7 @@ fn set_plan_grace_period_requires_the_merchants_auth() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
@@ -749,7 +750,7 @@ fn create_plan_stores_the_name() {
 
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -777,7 +778,7 @@ fn create_plan_accepts_an_empty_name() {
     // A name is optional; the UI falls back to the plan number.
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, ""),
@@ -802,7 +803,7 @@ fn create_plan_accepts_a_name_at_the_length_limit() {
     let at_limit = "x".repeat(MAX_NAME_LEN as usize);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, &at_limit),
@@ -827,7 +828,7 @@ fn create_plan_rejects_an_overlong_name() {
     let too_long = "x".repeat(MAX_NAME_LEN as usize + 1);
     let res = client.try_create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, &too_long),
@@ -853,7 +854,7 @@ fn merchant_plans_pages_are_bounded() {
     for _ in 0..(MAX_PAGE + 3) {
         client.create_plan(
             &merchant,
-            &token,
+            &soroban_sdk::vec![&env, token.clone()],
             &1_000,
             &3_600,
             &name,
@@ -1017,7 +1018,7 @@ fn deactivate_page_turns_off_a_page_of_plans() {
     for _ in 0..7 {
         ids.push_back(client.create_plan(
             &merchant,
-            &token,
+            &soroban_sdk::vec![&env, token.clone()],
             &1_000,
             &3_600,
             &name.clone(),
@@ -1053,7 +1054,7 @@ fn deactivate_page_is_idempotent() {
 
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &name,
@@ -1084,7 +1085,7 @@ fn deactivate_page_respects_the_page_cap() {
     for _ in 0..(MAX_PAGE + 3) {
         client.create_plan(
             &merchant,
-            &token,
+            &soroban_sdk::vec![&env, token.clone()],
             &1_000,
             &3_600,
             &name,
@@ -1123,7 +1124,7 @@ fn deactivate_page_only_touches_the_merchant_own_plans() {
     let b = Address::generate(&env);
     let a_id = client.create_plan(
         &a,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &name,
@@ -1138,7 +1139,7 @@ fn deactivate_page_only_touches_the_merchant_own_plans() {
     );
     let b_id = client.create_plan(
         &b,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &name,
@@ -1168,7 +1169,7 @@ fn deactivate_page_requires_the_merchants_auth() {
     let client = PlanRegistryClient::new(&env, &id);
     client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &String::from_str(&env, "Plan"),
@@ -1200,7 +1201,7 @@ fn create_plan_rejects_a_multibyte_name_over_the_byte_limit() {
     assert_eq!(name.len(), 66); // UTF-8 byte length, not character count
     let res = client.try_create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, &name),
@@ -1228,7 +1229,7 @@ fn create_plan_accepts_a_multibyte_name_at_the_byte_limit() {
     assert_eq!(name.len(), 63);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, &name),
@@ -1255,7 +1256,7 @@ fn set_successor_stores_the_replacement() {
     let token = Address::generate(&env);
     let old_id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1270,7 +1271,7 @@ fn set_successor_stores_the_replacement() {
     );
     let new_id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &2_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1301,7 +1302,7 @@ fn set_successor_rejects_a_plan_that_is_its_own_successor() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1328,7 +1329,7 @@ fn set_successor_rejects_an_unknown_successor() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1355,7 +1356,7 @@ fn set_successor_rejects_a_plan_of_another_merchant() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1370,7 +1371,7 @@ fn set_successor_rejects_a_plan_of_another_merchant() {
     );
     let other_id = client.create_plan(
         &other,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Other Plan"),
@@ -1398,7 +1399,7 @@ fn set_successor_rejects_a_different_token() {
     let other_token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1413,7 +1414,7 @@ fn set_successor_rejects_a_different_token() {
     );
     let other_id = client.create_plan(
         &merchant,
-        &other_token,
+        &soroban_sdk::vec![&env, other_token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1444,7 +1445,7 @@ fn set_successor_requires_the_merchants_auth() {
     let token = Address::generate(&env);
     let plan_id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1459,7 +1460,7 @@ fn set_successor_requires_the_merchants_auth() {
     );
     let replacement_id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &2_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1510,7 +1511,7 @@ fn set_successor_emits_plan_successor_set() {
     let token = Address::generate(&env);
     let old_id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1525,7 +1526,7 @@ fn set_successor_emits_plan_successor_set() {
     );
     let new_id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &2_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1566,7 +1567,7 @@ fn create_plan_stores_the_description() {
     let description = String::from_str(&env, "Monthly consults, unlimited follow-ups");
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1593,7 +1594,7 @@ fn an_empty_description_is_allowed() {
 
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1619,7 +1620,7 @@ fn a_description_at_the_limit_is_accepted() {
     let at_limit = String::from_str(&env, &"x".repeat(MAX_DESCRIPTION_LEN as usize));
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1645,7 +1646,7 @@ fn create_plan_rejects_an_overlong_description() {
     let too_long = String::from_str(&env, &"x".repeat(MAX_DESCRIPTION_LEN as usize + 1));
     let res = client.try_create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -1683,7 +1684,7 @@ fn create_plan_indexes_by_token() {
 
     let plan_1 = client.create_plan(
         &merchant_a,
-        &token_usdc,
+        &soroban_sdk::vec![&env, token_usdc.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "USDC Plan 1"),
@@ -1698,7 +1699,7 @@ fn create_plan_indexes_by_token() {
     );
     let plan_2 = client.create_plan(
         &merchant_b,
-        &token_usdc,
+        &soroban_sdk::vec![&env, token_usdc.clone()],
         &2_000,
         &604_800,
         &String::from_str(&env, "USDC Plan 2"),
@@ -1713,7 +1714,7 @@ fn create_plan_indexes_by_token() {
     );
     let plan_3 = client.create_plan(
         &merchant_a,
-        &token_xlm,
+        &soroban_sdk::vec![&env, token_xlm.clone()],
         &5_000,
         &604_800,
         &String::from_str(&env, "XLM Plan 1"),
@@ -1750,7 +1751,7 @@ fn token_plans_pages_are_bounded() {
     for _ in 0..(MAX_PAGE + 3) {
         client.create_plan(
             &merchant,
-            &token,
+            &soroban_sdk::vec![&env, token.clone()],
             &1_000,
             &3_600,
             &name,
@@ -1786,7 +1787,7 @@ fn set_plan_name_renames_only_the_label() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
@@ -1808,7 +1809,7 @@ fn set_plan_name_renames_only_the_label() {
     // Everything a mandate is priced from is frozen.
     assert_eq!(plan.amount, 1_000);
     assert_eq!(plan.period, 2_592_000);
-    assert_eq!(plan.token, token);
+    assert_eq!(plan.accepted_tokens, soroban_sdk::vec![&env, token]);
     assert!(plan.active);
 }
 
@@ -1820,7 +1821,7 @@ fn set_plan_name_rejects_another_merchant_and_a_missing_plan() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
@@ -1852,7 +1853,7 @@ fn set_plan_name_rejects_a_name_over_the_limit() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
@@ -1880,7 +1881,7 @@ fn set_plan_name_requires_the_merchants_auth() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
@@ -1930,7 +1931,7 @@ fn create_plan_requires_the_merchants_auth() {
     assert!(client
         .try_create_plan(
             &merchant,
-            &token,
+            &soroban_sdk::vec![&env, token.clone()],
             &1_000,
             &2_592_000,
             &String::from_str(&env, "Pro Monthly"),
@@ -1953,7 +1954,7 @@ fn set_plan_active_requires_the_merchants_auth() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &2_592_000,
         &String::from_str(&env, "Pro Monthly"),
@@ -2003,7 +2004,7 @@ fn create_plan_stores_the_terms_uri() {
 
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -2029,7 +2030,7 @@ fn create_plan_accepts_an_empty_terms_uri() {
     // The URI is optional: not every plan has published terms yet.
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -2055,7 +2056,7 @@ fn create_plan_accepts_a_terms_uri_at_the_byte_limit() {
 
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -2081,7 +2082,7 @@ fn create_plan_rejects_an_overlong_terms_uri() {
 
     let res = client.try_create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -2114,7 +2115,7 @@ fn create_plan_rejects_a_multibyte_terms_uri_over_the_byte_limit() {
 
     let res = client.try_create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -2140,7 +2141,7 @@ fn plan_created_carries_the_terms_uri() {
 
     client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -2167,7 +2168,7 @@ fn create_plan_stores_the_availability_cutoff() {
     let empty = String::from_str(&env, "");
     let forever = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &String::from_str(&env, "Always"),
@@ -2182,7 +2183,7 @@ fn create_plan_stores_the_availability_cutoff() {
     );
     let promo = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &String::from_str(&env, "Launch"),
@@ -2209,7 +2210,7 @@ fn plan_created_event_carries_the_availability_cutoff() {
 
     client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &String::from_str(&env, "Launch"),
@@ -2248,7 +2249,7 @@ fn create_plan_defaults_payout_to_the_merchant() {
 
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -2275,7 +2276,7 @@ fn create_plan_records_an_explicit_payout() {
 
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -2302,7 +2303,7 @@ fn create_plan_stores_the_referral_share() {
 
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -2327,7 +2328,7 @@ fn create_plan_rejects_a_referral_share_above_the_cap() {
 
     let res = client.try_create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -2347,7 +2348,7 @@ fn create_plan_rejects_a_referral_share_above_the_cap() {
     // Exactly the cap is accepted.
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Pro Monthly"),
@@ -2371,7 +2372,7 @@ fn propose_and_accept_moves_the_plan_between_merchants() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &String::from_str(&env, "Plan"),
@@ -2415,7 +2416,7 @@ fn transfer_moves_a_plan_out_of_a_multi_plan_index() {
 
     let first = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &name,
@@ -2430,7 +2431,7 @@ fn transfer_moves_a_plan_out_of_a_multi_plan_index() {
     );
     let middle = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &name,
@@ -2445,7 +2446,7 @@ fn transfer_moves_a_plan_out_of_a_multi_plan_index() {
     );
     let last = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &name,
@@ -2481,7 +2482,7 @@ fn transfer_moves_a_plan_out_of_a_multi_plan_index() {
     // Appending still works after the removal.
     let fourth = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &name,
@@ -2508,7 +2509,7 @@ fn only_the_owner_can_propose_a_transfer() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &String::from_str(&env, "Plan"),
@@ -2546,7 +2547,7 @@ fn only_the_proposed_owner_can_accept() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &String::from_str(&env, "Plan"),
@@ -2590,7 +2591,7 @@ fn a_transfer_proposal_is_one_shot() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &String::from_str(&env, "Plan"),
@@ -2623,7 +2624,7 @@ fn a_new_proposal_replaces_the_old_one() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &String::from_str(&env, "Plan"),
@@ -2659,7 +2660,7 @@ fn propose_requires_the_merchants_auth() {
     let client = PlanRegistryClient::new(&env, &id);
     let plan = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &String::from_str(&env, "Plan"),
@@ -2696,7 +2697,7 @@ fn accept_requires_the_new_owners_signature() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &String::from_str(&env, "Plan"),
@@ -2735,7 +2736,7 @@ fn transfer_emits_proposal_and_transfer_events() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &String::from_str(&env, "Plan"),
@@ -2796,7 +2797,7 @@ fn create_plan_stores_max_subscribers() {
 
     let seated = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Cohort"),
@@ -2814,7 +2815,7 @@ fn create_plan_stores_max_subscribers() {
     // 0 means unlimited.
     let open = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Open"),
@@ -2838,7 +2839,7 @@ fn plan_created_event_carries_the_seat_cap() {
 
     client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Cohort"),
@@ -2864,7 +2865,7 @@ fn admin_can_upgrade_and_state_written_before_survives() {
     let token = Address::generate(&env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Plan"),
@@ -2890,7 +2891,7 @@ fn admin_can_upgrade_and_state_written_before_survives() {
     // The new code still runs: the next plan gets the next id.
     let next = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Second"),
@@ -3050,7 +3051,7 @@ fn owned_plan(env: &Env, client: &PlanRegistryClient) -> (u64, Address) {
     let token = Address::generate(env);
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &3_600,
         &String::from_str(env, "Plan"),
@@ -3339,13 +3340,19 @@ fn create_plans_creates_a_sequential_batch() {
 
     let first = client.get_plan(&1);
     assert_eq!(first.merchant, merchant);
-    assert_eq!(first.token, token_a);
+    assert_eq!(
+        first.accepted_tokens,
+        soroban_sdk::vec![&env, token_a.clone()]
+    );
     assert_eq!(first.amount, 1_000);
     assert_eq!(first.payout, merchant);
     assert_eq!(first.name, String::from_str(&env, "First"));
 
     let second = client.get_plan(&2);
-    assert_eq!(second.token, token_b);
+    assert_eq!(
+        second.accepted_tokens,
+        soroban_sdk::vec![&env, token_b.clone()]
+    );
     assert_eq!(second.payout, payout);
     assert_eq!(second.amount, 2_000);
 
@@ -3616,7 +3623,7 @@ fn deterministic_extreme_plan_inputs_never_trap() {
 
         assert_typed_error(client.try_create_plan(
             &merchant,
-            &token,
+            &soroban_sdk::vec![&env, token.clone()],
             &amount,
             &period,
             &name,
@@ -3660,7 +3667,7 @@ fn assert_read_only<T>(env: &Env, label: &str, call: impl FnOnce() -> T) -> T {
 fn simple_plan(env: &Env, client: &PlanRegistryClient, merchant: &Address, token: &Address) -> u64 {
     client.create_plan(
         merchant,
-        token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &2_592_000,
         &String::from_str(env, "Pro Monthly"),
@@ -3904,7 +3911,7 @@ fn fuzz_plan_ids_are_never_reused_after_retirement() {
                 let p = batch_plan(&env, &token, amount, "Fuzz");
                 let id = c.create_plan(
                     &merchant,
-                    &p.token,
+                    &p.accepted_tokens,
                     &p.amount,
                     &p.period,
                     &p.name,
@@ -3981,7 +3988,7 @@ fn fuzz_plan_ids_are_never_reused_after_retirement() {
                 assert!(c
                     .try_create_plan(
                         &merchant,
-                        &token,
+                        &soroban_sdk::vec![&env, token.clone()],
                         &0,
                         &2_592_000,
                         &String::from_str(&env, "Bad"),
@@ -4054,21 +4061,97 @@ fn mixed_token_catalogue() -> (Env, PlanRegistryClient<'static>, Address, Addres
 }
 
 #[test]
-fn merchant_plan_listings_expose_each_plans_token() {
-    let (_env, client, merchant, usdc, xlm) = mixed_token_catalogue();
+fn plan_indexes_each_accepted_token_and_rejects_invalid_token_lists() {
+    let (env, client, _) = setup();
+    let merchant = Address::generate(&env);
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+
+    let plan_id = client.create_plan(
+        &merchant,
+        &soroban_sdk::vec![&env, token_a.clone(), token_b.clone()],
+        &1_000,
+        &2_592_000,
+        &String::from_str(&env, "Multi-token"),
+        &String::from_str(&env, ""),
+        &0,
+        &Symbol::new(&env, ""),
+        &String::from_str(&env, ""),
+        &0,
+        &0,
+        &None::<Address>,
+        &0,
+    );
+
+    assert_eq!(
+        client.token_plans(&token_a, &0, &10),
+        soroban_sdk::vec![&env, plan_id]
+    );
+    assert_eq!(
+        client.token_plans(&token_b, &0, &10),
+        soroban_sdk::vec![&env, plan_id]
+    );
+    assert_eq!(
+        client.try_create_plan(
+            &merchant,
+            &soroban_sdk::Vec::new(&env),
+            &1_000,
+            &2_592_000,
+            &String::from_str(&env, "Empty"),
+            &String::from_str(&env, ""),
+            &0,
+            &Symbol::new(&env, ""),
+            &String::from_str(&env, ""),
+            &0,
+            &0,
+            &None::<Address>,
+            &0,
+        ),
+        Err(Ok(Error::InvalidAcceptedTokens))
+    );
+    assert_eq!(
+        client.try_create_plan(
+            &merchant,
+            &soroban_sdk::vec![&env, token_a.clone(), token_a.clone()],
+            &1_000,
+            &2_592_000,
+            &String::from_str(&env, "Duplicate"),
+            &String::from_str(&env, ""),
+            &0,
+            &Symbol::new(&env, ""),
+            &String::from_str(&env, ""),
+            &0,
+            &0,
+            &None::<Address>,
+            &0,
+        ),
+        Err(Ok(Error::InvalidAcceptedTokens))
+    );
+    assert_eq!(client.next_plan_id(), 2);
+}
+
+#[test]
+fn merchant_plan_listings_expose_each_plans_accepted_tokens() {
+    let (env, client, merchant, usdc, xlm) = mixed_token_catalogue();
 
     let rows = client.merchant_plan_listings(&merchant, &0, &10);
     assert_eq!(rows.len(), 3);
-    // Same name and price, different settlement token: the row disambiguates.
+    // Same name and price, different accepted-token lists: each row disambiguates.
     let a = rows.get(0).unwrap();
     let b = rows.get(1).unwrap();
-    assert_eq!((a.id, a.token.clone(), a.amount), (1, usdc.clone(), 1_000));
-    assert_eq!((b.id, b.token.clone(), b.amount), (2, xlm, 1_000));
+    assert_eq!(
+        (a.id, a.accepted_tokens.clone(), a.amount),
+        (1, soroban_sdk::vec![&env, usdc.clone()], 1_000)
+    );
+    assert_eq!(
+        (b.id, b.accepted_tokens.clone(), b.amount),
+        (2, soroban_sdk::vec![&env, xlm], 1_000)
+    );
     assert_eq!(a.name, b.name);
     let c = rows.get(2).unwrap();
     assert_eq!(
-        (c.id, c.token, c.amount, c.period),
-        (3, usdc, 5_000, 2_592_000)
+        (c.id, c.accepted_tokens, c.amount, c.period),
+        (3, soroban_sdk::vec![&env, usdc], 5_000, 2_592_000)
     );
     assert!(c.active);
     assert_eq!(c.merchant, merchant);
@@ -4076,7 +4159,7 @@ fn merchant_plan_listings_expose_each_plans_token() {
     // Rows always match get_plan.
     for row in rows.iter() {
         let plan = client.get_plan(&row.id);
-        assert_eq!(row.token, plan.token);
+        assert_eq!(row.accepted_tokens, plan.accepted_tokens);
         assert_eq!(row.merchant, plan.merchant);
     }
 }
@@ -4087,7 +4170,9 @@ fn token_plan_listings_only_contain_plans_in_that_token() {
 
     let usdc_rows = client.token_plan_listings(&usdc, &0, &10);
     assert_eq!(usdc_rows.len(), 2);
-    assert!(usdc_rows.iter().all(|r| r.token == usdc));
+    assert!(usdc_rows
+        .iter()
+        .all(|r| r.accepted_tokens.contains(usdc.clone())));
     let xlm_rows = client.token_plan_listings(&xlm, &0, &10);
     assert_eq!(xlm_rows.len(), 1);
     assert_eq!(xlm_rows.get(0).unwrap().id, 2);
@@ -4139,7 +4224,7 @@ fn create_plan_accepts_maximum_numeric_values() {
 
     let id = client.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &i128::MAX,
         &u64::MAX,
         &String::from_str(&env, "Max Plan"),
@@ -4174,7 +4259,7 @@ fn create_plan_rejects_u32_maximum_basis_points_without_writing() {
 
     let keeper = client.try_create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Plan"),
@@ -4191,7 +4276,7 @@ fn create_plan_rejects_u32_maximum_basis_points_without_writing() {
 
     let referral = client.try_create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Plan"),
@@ -4219,7 +4304,7 @@ fn create_plan_with_maximum_values_requires_the_merchants_auth() {
     assert!(client
         .try_create_plan(
             &merchant,
-            &token,
+            &soroban_sdk::vec![&env, token.clone()],
             &i128::MAX,
             &u64::MAX,
             &String::from_str(&env, "Max Plan"),
@@ -4258,7 +4343,7 @@ fn plan_id_counter_accepts_the_last_ids_then_fails_with_a_typed_error() {
 
     let result = client.try_create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &1_000,
         &604_800,
         &String::from_str(&env, "Exhausted"),

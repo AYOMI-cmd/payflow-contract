@@ -91,6 +91,66 @@ fn world() -> World<'static> {
     }
 }
 
+#[test]
+fn subscriber_selects_an_accepted_token_for_mandate_and_charge() {
+    let w = world();
+    let other_issuer = Address::generate(&w.env);
+    let other_token = w
+        .env
+        .register_stellar_asset_contract_v2(other_issuer)
+        .address();
+    let other_token_admin = StellarAssetClient::new(&w.env, &other_token);
+    let other_token_client = TokenClient::new(&w.env, &other_token);
+    let plan_id = w.registry.create_plan(
+        &w.merchant,
+        &soroban_sdk::vec![&w.env, w.token.clone(), other_token.clone()],
+        &PRICE,
+        &MONTH,
+        &String::from_str(&w.env, "Multi-token plan"),
+        &String::from_str(&w.env, ""),
+        &0,
+        &Symbol::new(&w.env, ""),
+        &String::from_str(&w.env, ""),
+        &0,
+        &0,
+        &None::<Address>,
+        &0,
+    );
+
+    let user = Address::generate(&w.env);
+    other_token_admin.mint(&user, &100_000);
+    w.vault.deposit(&user, &other_token, &100_000);
+    let mandate_id = w
+        .sub
+        .subscribe(&user, &plan_id, &other_token, &0, &0, &None::<Address>);
+
+    let mandate = w.sub.get_mandate(&mandate_id);
+    assert_eq!(mandate.token, other_token);
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id, &w.token), 0);
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id, &other_token), PRICE);
+
+    w.sub.charge(&w.keeper, &mandate_id);
+    assert_eq!(other_token_client.balance(&w.merchant), PRICE - 100);
+    assert_eq!(other_token_client.balance(&w.fee_to), 100);
+    assert_eq!(w.vault.balance(&user, &other_token), 100_000 - PRICE);
+    assert_eq!(w.token_client.balance(&w.merchant), 0);
+}
+
+#[test]
+fn subscribe_rejects_a_token_the_plan_does_not_accept() {
+    let w = world();
+    let plan_id = w.plan();
+    let user = w.subscriber(100_000);
+    let unaccepted_token = Address::generate(&w.env);
+
+    assert_eq!(
+        w.sub
+            .try_subscribe(&user, &plan_id, &unaccepted_token, &0, &0, &None::<Address>,),
+        Err(Ok(Error::TokenNotAccepted))
+    );
+    assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
+}
+
 impl World<'_> {
     /// A plan with no keeper tip, which is what most tests want.
     fn plan(&self) -> u64 {
@@ -107,7 +167,7 @@ impl World<'_> {
     fn plan_full(&self, keeper_bps: u32, referral_bps: u32, payout: Option<Address>) -> u64 {
         self.registry.create_plan(
             &self.merchant,
-            &self.token,
+            &soroban_sdk::vec![&self.env, self.token.clone()],
             &PRICE,
             &MONTH,
             &String::from_str(&self.env, "Demo Plan"),
@@ -126,7 +186,7 @@ impl World<'_> {
     fn plan_with_cap(&self, max_subscribers: u32) -> u64 {
         self.registry.create_plan(
             &self.merchant,
-            &self.token,
+            &soroban_sdk::vec![&self.env, self.token.clone()],
             &PRICE,
             &MONTH,
             &String::from_str(&self.env, "Seated Plan"),
@@ -150,7 +210,7 @@ impl World<'_> {
     fn plan_priced_with_keeper(&self, price: i128, keeper_bps: u32) -> u64 {
         self.registry.create_plan(
             &self.merchant,
-            &self.token,
+            &soroban_sdk::vec![&self.env, self.token.clone()],
             &price,
             &MONTH,
             &String::from_str(&self.env, "Demo Plan"),
@@ -169,7 +229,7 @@ impl World<'_> {
     fn plan_amount(&self, amount: i128, period: u64) -> u64 {
         self.registry.create_plan(
             &self.merchant,
-            &self.token,
+            &soroban_sdk::vec![&self.env, self.token.clone()],
             &amount,
             &period,
             &String::from_str(&self.env, "Custom Plan"),
@@ -202,7 +262,7 @@ impl World<'_> {
     fn plan_expiring(&self, cutoff: u64) -> u64 {
         self.registry.create_plan(
             &self.merchant,
-            &self.token,
+            &soroban_sdk::vec![&self.env, self.token.clone()],
             &PRICE,
             &MONTH,
             &String::from_str(&self.env, "Promo Plan"),
@@ -234,7 +294,9 @@ fn charge_does_not_top_up_without_opt_in() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(PRICE / 2);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert!(w.sub.try_charge(&w.keeper, &id).is_err());
     assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
@@ -255,7 +317,9 @@ fn subscribe_copies_plan_terms_into_mandate() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
 
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     let m = w.sub.get_mandate(&id);
 
     assert_eq!(m.subscriber, user);
@@ -269,7 +333,7 @@ fn subscribe_copies_plan_terms_into_mandate() {
 }
 
 /// Acceptance check for the auth-tree issue: `subscribe` must require exactly
-/// the subscriber's authorization for `subscribe(subscriber, plan_id,
+/// the subscriber's authorization for `subscribe(subscriber, plan_id, token,
 /// max_charges, max_total, referrer)`,
 /// and nothing else.
 #[test]
@@ -283,12 +347,14 @@ fn subscribe_auth_tree_is_exactly_the_subscriber() {
         invoke: &MockAuthInvoke {
             contract: &w.sub.address,
             fn_name: "subscribe",
-            args: (&user, &plan_id, &0u32, &0i128, &None::<Address>).into_val(&w.env),
+            args: (&user, &plan_id, &w.token, &0u32, &0i128, &None::<Address>).into_val(&w.env),
             sub_invokes: &[],
         },
     }]);
 
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     // env.auths() reports the last invocation only, so read it before get_mandate.
     let auths = w.env.auths();
     assert_eq!(w.sub.get_mandate(&id).subscriber, user);
@@ -301,7 +367,9 @@ fn estimated_end_tracks_the_schedule_after_a_late_charge() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &4, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &4, &0, &None::<Address>);
 
     assert_eq!(w.sub.estimated_end(&id), Some(1_000_000 + 3 * MONTH));
 
@@ -330,7 +398,9 @@ fn estimated_end_is_none_for_open_ended_mandates() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.env.mock_auths(&[]);
     assert_eq!(w.sub.estimated_end(&id), None);
@@ -342,7 +412,9 @@ fn estimated_end_reports_schedule_overflow() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     w.env.ledger().set_timestamp(u64::MAX - MONTH + 1);
-    let id = w.sub.subscribe(&user, &plan_id, &2, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &2, &0, &None::<Address>);
 
     assert_eq!(
         w.sub.try_estimated_end(&id),
@@ -361,13 +433,13 @@ fn next_mandate_id_matches_the_next_subscription() {
 
     let first_id = w
         .sub
-        .subscribe(&first_user, &plan_id, &0, &0, &None::<Address>);
+        .subscribe(&first_user, &plan_id, &w.token, &0, &0, &None::<Address>);
     let next_id = w.sub.next_mandate_id();
     assert_eq!(next_id, first_id + 1);
 
     let second_id = w
         .sub
-        .subscribe(&second_user, &plan_id, &0, &0, &None::<Address>);
+        .subscribe(&second_user, &plan_id, &w.token, &0, &0, &None::<Address>);
     assert_eq!(second_id, next_id);
 }
 
@@ -520,7 +592,9 @@ fn subscribe_event_carries_the_spend_cap() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
 
-    let id = w.sub.subscribe(&user, &plan_id, &3, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &3, &0, &None::<Address>);
 
     // The cap must be recoverable from the event alone. An indexer that reads
     // only events must not have to guess it, or it will report a capped
@@ -542,7 +616,7 @@ fn subscribe_rejects_inactive_plan() {
 
     assert_eq!(
         w.sub
-            .try_subscribe(&user, &plan_id, &0, &0, &None::<Address>,),
+            .try_subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>,),
         Err(Ok(Error::PlanInactive))
     );
 }
@@ -552,7 +626,9 @@ fn first_charge_is_due_immediately_and_splits_fee() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert!(w.sub.is_due(&id));
     w.sub.charge(&w.keeper, &id);
@@ -576,7 +652,9 @@ fn charge_settles_merchant_and_fee_through_one_vault_call() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
 
@@ -604,7 +682,9 @@ fn a_zero_fee_charge_emits_one_debit() {
     // second leg and must look exactly like a single `debit` call.
     w.sub.set_fee_bps(&0);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
 
@@ -619,7 +699,9 @@ fn a_tipped_charge_still_pays_three_payees() {
     let w = world();
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
 
@@ -649,14 +731,14 @@ fn subscribe_requires_the_subscriber_to_authorize() {
         invoke: &MockAuthInvoke {
             contract: &w.sub.address,
             fn_name: "subscribe",
-            args: (&user, &plan_id, &0u32, &0i128, &None::<Address>).into_val(&w.env),
+            args: (&user, &plan_id, &w.token, &0u32, &0i128, &None::<Address>).into_val(&w.env),
             sub_invokes: &[],
         },
     }]);
 
     assert!(w
         .sub
-        .try_subscribe(&user, &plan_id, &0, &0, &None::<Address>,)
+        .try_subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>,)
         .is_err());
 }
 
@@ -665,7 +747,9 @@ fn any_account_can_settle_a_charge() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // An unrelated account may settle the mandate: `charge` needs no
     // subscriber or merchant signature, and the vault accepts the debit purely
@@ -683,7 +767,9 @@ fn charge_requires_the_keeper_to_authorize() {
     let w = world();
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // The tip is paid to the caller, so the caller must prove it controls
     // that address. With every authorization dropped, nothing settles.
@@ -698,7 +784,9 @@ fn a_different_signer_cannot_collect_the_tip() {
     let w = world();
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // The subscriber signs, but the caller is the keeper: the signature does
     // not cover the keeper address, so the charge is rejected.
@@ -720,7 +808,9 @@ fn keeper_tip_is_paid_from_the_merchant_share() {
     let w = world();
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
     let merchant_gross = PRICE - fee;
@@ -742,7 +832,9 @@ fn charge_result_matches_charged_event_and_reports_completion() {
     let w = world();
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &1, &0, &None::<Address>);
 
     let result = w.sub.charge(&w.keeper, &id);
 
@@ -779,8 +871,12 @@ fn subscriber_pays_the_same_total_with_or_without_a_tip() {
 
     let without = w.subscriber(100_000);
     let with = w.subscriber(100_000);
-    let plain_id = w.sub.subscribe(&without, &plain, &0, &0, &None::<Address>);
-    let tipped_id = w.sub.subscribe(&with, &tipped, &0, &0, &None::<Address>);
+    let plain_id = w
+        .sub
+        .subscribe(&without, &plain, &w.token, &0, &0, &None::<Address>);
+    let tipped_id = w
+        .sub
+        .subscribe(&with, &tipped, &w.token, &0, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &plain_id);
     w.sub.charge(&w.keeper, &tipped_id);
@@ -799,7 +895,9 @@ fn second_charge_is_rejected_before_due_and_succeeds_at_due_time() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     let next_charge = w.sub.get_mandate(&id).next_charge;
@@ -819,7 +917,9 @@ fn charge_succeeds_once_period_elapses() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
@@ -834,7 +934,9 @@ fn keeper_outage_does_not_create_a_chargeable_backlog() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     // Nobody calls charge for five periods.
@@ -851,7 +953,9 @@ fn cancel_stops_billing_permanently() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     w.sub.cancel(&user, &id);
@@ -871,7 +975,9 @@ fn cancel_rejects_non_subscriber() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     let attacker = Address::generate(&w.env);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert_eq!(
         w.sub.try_cancel(&attacker, &id),
@@ -884,7 +990,9 @@ fn cancel_twice_is_rejected() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.cancel(&user, &id);
     assert_eq!(
@@ -902,7 +1010,9 @@ fn cancel_with_reason_records_the_code_in_the_event() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     w.sub
@@ -924,7 +1034,9 @@ fn plain_cancel_emits_reason_zero() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.cancel(&user, &id);
 
@@ -941,7 +1053,9 @@ fn every_documented_cancel_reason_is_accepted() {
     let user = w.subscriber(100_000);
 
     for reason in CANCEL_REASON_NONE..=MAX_CANCEL_REASON {
-        let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+        let id = w
+            .sub
+            .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
         w.sub.cancel_with_reason(&user, &id, &reason);
         assert_eq!(event_field_u32(&w.env, "reason"), Some(reason));
         assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Cancelled);
@@ -953,7 +1067,9 @@ fn an_undocumented_cancel_reason_is_rejected() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert_eq!(
         w.sub
@@ -974,7 +1090,9 @@ fn cancel_with_reason_rejects_a_non_subscriber() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     let attacker = Address::generate(&w.env);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert_eq!(
         w.sub
@@ -995,7 +1113,9 @@ fn cancel_with_reason_wrong_signer_rejected() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // A reason is not an authorization: only the subscriber's own signature
     // may cancel, even though anyone can read the code set.
@@ -1022,7 +1142,9 @@ fn cancel_with_reason_cannot_cancel_twice() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.cancel_with_reason(&user, &id, &CANCEL_REASON_OTHER);
     assert_eq!(
@@ -1038,9 +1160,14 @@ fn mandate_owner_transfer_updates_indexes_and_future_charges() {
     let plan_id = w.plan();
     let old_subscriber = w.subscriber(100_000);
     let new_subscriber = w.subscriber(100_000);
-    let id = w
-        .sub
-        .subscribe(&old_subscriber, &plan_id, &0, &0, &None::<Address>);
+    let id = w.sub.subscribe(
+        &old_subscriber,
+        &plan_id,
+        &w.token,
+        &0,
+        &0,
+        &None::<Address>,
+    );
 
     w.sub
         .propose_mandate_owner(&old_subscriber, &id, &new_subscriber, &0);
@@ -1089,12 +1216,22 @@ fn mandate_owner_transfer_repairs_a_pending_index_position() {
     let old_subscriber = w.subscriber(100_000);
     let first_new_owner = w.subscriber(100_000);
     let second_new_owner = w.subscriber(100_000);
-    let first_id = w
-        .sub
-        .subscribe(&old_subscriber, &plan_id, &0, &0, &None::<Address>);
-    let second_id = w
-        .sub
-        .subscribe(&old_subscriber, &plan_id, &0, &0, &None::<Address>);
+    let first_id = w.sub.subscribe(
+        &old_subscriber,
+        &plan_id,
+        &w.token,
+        &0,
+        &0,
+        &None::<Address>,
+    );
+    let second_id = w.sub.subscribe(
+        &old_subscriber,
+        &plan_id,
+        &w.token,
+        &0,
+        &0,
+        &None::<Address>,
+    );
 
     w.sub
         .propose_mandate_owner(&old_subscriber, &second_id, &first_new_owner, &1);
@@ -1123,7 +1260,7 @@ fn propose_mandate_owner_requires_subscriber_auth() {
     let wrong_signer = Address::generate(&w.env);
     let id = w
         .sub
-        .subscribe(&subscriber, &plan_id, &0, &0, &None::<Address>);
+        .subscribe(&subscriber, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // A signer other than the current subscriber cannot propose the transfer.
     w.env.mock_auths(&[MockAuth {
@@ -1150,7 +1287,7 @@ fn accept_mandate_owner_requires_new_subscriber_auth() {
     let wrong_signer = Address::generate(&w.env);
     let id = w
         .sub
-        .subscribe(&subscriber, &plan_id, &0, &0, &None::<Address>);
+        .subscribe(&subscriber, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.env.mock_all_auths();
     w.sub
@@ -1180,7 +1317,7 @@ fn mandate_owner_transfer_rejects_invalid_proposals_and_positions() {
     let new_subscriber = w.subscriber(100_000);
     let id = w
         .sub
-        .subscribe(&subscriber, &plan_id, &0, &0, &None::<Address>);
+        .subscribe(&subscriber, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert_eq!(
         w.sub
@@ -1206,7 +1343,9 @@ fn pause_suspends_billing_and_resume_restores_it() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.set_paused(&user, &id, &true);
     assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Paused);
@@ -1227,7 +1366,9 @@ fn pausing_a_cancelled_mandate_is_rejected() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.cancel(&user, &id);
     assert_eq!(
@@ -1241,7 +1382,9 @@ fn max_charges_completes_the_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &2, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &2, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
@@ -1265,7 +1408,9 @@ fn charge_fails_when_vault_is_underfunded() {
     let plan_id = w.plan();
     // Funded for one charge only.
     let user = w.subscriber(PRICE);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     assert_eq!(w.vault.balance(&user, &w.token), 0);
@@ -1281,7 +1426,9 @@ fn subscriber_can_withdraw_and_starve_a_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.vault.withdraw(&user, &w.token, &100_000);
     assert!(w.sub.try_charge(&w.keeper, &id).is_err());
@@ -1293,8 +1440,12 @@ fn indexes_track_both_sides() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
 
-    let a = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let b = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let a = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    let b = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert_eq!(
         w.sub.subscriber_mandates(&user, &0, &10),
@@ -1340,7 +1491,7 @@ fn zero_fee_pays_merchant_in_full() {
 
     let plan_id = registry.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &PRICE,
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
@@ -1357,7 +1508,7 @@ fn zero_fee_pays_merchant_in_full() {
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
     vault.deposit(&user, &token, &100_000);
 
-    let id = sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = sub.subscribe(&user, &plan_id, &token, &0, &0, &None::<Address>);
     sub.charge(&keeper, &id);
 
     assert_eq!(TokenClient::new(&env, &token).balance(&merchant), PRICE);
@@ -1402,7 +1553,9 @@ fn quote_matches_charge_for_a_price_that_rounds() {
     let w = world();
     let plan_id = w.plan_priced(101);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let quote = w.sub.quote_charge(&id);
     assert_eq!(
@@ -1439,7 +1592,9 @@ fn quote_merchant_amount_excludes_the_keeper_tip() {
     let w = world();
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let quote = w.sub.quote_charge(&id);
     let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
@@ -1471,7 +1626,9 @@ fn quote_never_changes_state() {
     let w = world();
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let mandate_before = w.sub.get_mandate(&id);
     let balances_before = (
@@ -1508,7 +1665,9 @@ fn quote_chargeable_mirrors_is_due() {
     let user = w.subscriber(100_000);
 
     // Active and due.
-    let capped = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    let capped = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &1, &0, &None::<Address>);
     assert!(w.sub.is_due(&capped));
     assert!(w.sub.quote_charge(&capped).chargeable);
     w.sub.charge(&w.keeper, &capped);
@@ -1518,19 +1677,25 @@ fn quote_chargeable_mirrors_is_due() {
     assert!(!w.sub.quote_charge(&capped).chargeable);
 
     // Paused.
-    let paused = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let paused = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.set_paused(&user, &paused, &true);
     assert!(!w.sub.is_due(&paused));
     assert!(!w.sub.quote_charge(&paused).chargeable);
 
     // Cancelled.
-    let cancelled = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let cancelled = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.cancel(&user, &cancelled);
     assert!(!w.sub.is_due(&cancelled));
     assert!(!w.sub.quote_charge(&cancelled).chargeable);
 
     // Active but waiting for the next period.
-    let waiting = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let waiting = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &waiting);
     assert!(!w.sub.is_due(&waiting));
     assert!(!w.sub.quote_charge(&waiting).chargeable);
@@ -1546,7 +1711,9 @@ fn quote_needs_no_authorization() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.env.mock_auths(&[]);
     assert_eq!(w.sub.quote_charge(&id).amount, PRICE);
@@ -1561,7 +1728,7 @@ fn simulate_charge_reports_exact_recipients_without_authorization_or_writes() {
     let user = w.subscriber(100_000);
     let id = w
         .sub
-        .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &Some(referrer.clone()));
     let mandate_before = w.sub.get_mandate(&id);
     let vault_before = w.vault.balance(&user, &w.token);
 
@@ -1606,7 +1773,9 @@ fn simulate_charge_reports_paused_and_missing_mandates() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.set_protocol_paused(&true);
     assert!(!w.sub.simulate_charge(&w.keeper, &id).chargeable);
@@ -1621,7 +1790,9 @@ fn simulate_charge_reports_plan_pause_and_cap_without_moving_funds() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &1, &0, &None::<Address>);
 
     w.registry
         .set_plan_charges_paused(&w.merchant, &plan_id, &true);
@@ -1639,7 +1810,9 @@ fn simulate_charge_reports_amount_overflow() {
     let w = world();
     let plan_id = w.plan_priced(i128::MAX);
     let user = w.subscriber(1_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert_eq!(
         w.sub.try_simulate_charge(&w.keeper, &id),
@@ -1654,7 +1827,9 @@ fn quote_and_charge_report_fee_overflow() {
     let w = world();
     let plan_id = w.plan_priced(i128::MAX);
     let user = w.subscriber(1_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert_eq!(w.sub.try_quote_charge(&id), Err(Ok(Error::AmountOverflow)));
     assert_eq!(
@@ -1674,7 +1849,7 @@ fn quote_matches_charge_with_keeper_tip_and_referral() {
     let user = w.subscriber(100_000);
     let id = w
         .sub
-        .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &Some(referrer.clone()));
 
     let quote = w.sub.quote_charge(&id);
     let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
@@ -1704,7 +1879,9 @@ fn quote_matches_charge_with_zero_fee() {
     w.sub.set_fee_bps(&0);
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let quote = w.sub.quote_charge(&id);
     let tip = PRICE * i128::from(KEEPER_BPS) / BPS_DENOMINATOR;
@@ -1728,7 +1905,9 @@ fn quote_and_charge_agree_on_max_charges_reached() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &1, &0, &None::<Address>);
 
     // First charge succeeds.
     w.sub.charge(&w.keeper, &id);
@@ -1756,9 +1935,14 @@ fn quote_and_charge_agree_on_max_total_reached() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     // max_total = 2 * PRICE, so two charges max.
-    let id = w
-        .sub
-        .subscribe(&user, &plan_id, &0, &(2 * PRICE), &None::<Address>);
+    let id = w.sub.subscribe(
+        &user,
+        &plan_id,
+        &w.token,
+        &0,
+        &(2 * PRICE),
+        &None::<Address>,
+    );
 
     // Verify max_total is set correctly.
     let mandate = w.sub.get_mandate(&id);
@@ -1799,7 +1983,9 @@ fn quote_and_charge_agree_on_plan_charges_paused() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // Pause charging at the plan level.
     w.registry
@@ -1821,7 +2007,9 @@ fn quote_and_charge_agree_on_mandate_paused() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.set_paused(&user, &id, &true);
 
@@ -1841,7 +2029,9 @@ fn quote_and_charge_agree_on_mandate_cancelled() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.cancel(&user, &id);
 
@@ -1861,7 +2051,9 @@ fn quote_and_charge_agree_on_mandate_completed() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &1, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Completed);
@@ -1882,7 +2074,9 @@ fn quote_and_charge_agree_on_not_due() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // Charge once to advance next_charge.
     w.sub.charge(&w.keeper, &id);
@@ -1902,7 +2096,9 @@ fn charge_with_a_zero_payout_address_fails_at_settlement() {
     let zero = Address::from_str(&w.env, ZERO_CONTRACT);
     let plan_id = w.plan_full(0, 0, Some(zero.clone()));
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert!(w.sub.quote_charge(&id).chargeable);
     assert_eq!(
@@ -1920,7 +2116,9 @@ fn quote_chargeable_but_charge_fails_on_insufficient_balance() {
     let w = world();
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(100); // Only 100, less than PRICE (10_000)
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let quote = w.sub.quote_charge(&id);
     assert!(quote.chargeable);
@@ -1946,7 +2144,9 @@ fn quote_and_charge_agree_after_pause_until_resumes() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let now = w.env.ledger().timestamp();
     let until = now + 3_600; // 1 hour
@@ -1979,7 +2179,9 @@ fn quote_and_charge_agree_after_max_charges_increased() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     // Start with max_charges = 1
-    let id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &1, &0, &None::<Address>);
 
     // Quote shows chargeable.
     let quote = w.sub.quote_charge(&id);
@@ -2005,7 +2207,9 @@ fn quote_no_auth_charge_requires_keeper_auth() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // Quote works with no auth.
     w.env.mock_auths(&[]);
@@ -2036,7 +2240,9 @@ fn set_fee_bps_changes_the_fee_for_new_mandates() {
     assert_eq!(w.sub.fee_bps(), 0);
 
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     // Zero fee: the merchant receives the whole charge.
@@ -2051,7 +2257,9 @@ fn an_admin_fee_change_cannot_reprice_an_open_mandate() {
     let user = w.subscriber(100_000);
 
     // Subscriber opens at 1%.
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     assert_eq!(w.sub.get_mandate(&id).fee_bps, FEE_BPS);
 
     // Admin raises the fee to the 10% ceiling afterwards.
@@ -2072,12 +2280,16 @@ fn mandates_opened_before_and_after_a_fee_change_keep_their_own_fees() {
     let w = world();
     let plan_id = w.plan();
     let before = w.subscriber(100_000);
-    let old_id = w.sub.subscribe(&before, &plan_id, &0, &0, &None::<Address>);
+    let old_id = w
+        .sub
+        .subscribe(&before, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.set_fee_bps(&0);
 
     let after = w.subscriber(100_000);
-    let new_id = w.sub.subscribe(&after, &plan_id, &0, &0, &None::<Address>);
+    let new_id = w
+        .sub
+        .subscribe(&after, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert_eq!(w.sub.get_mandate(&old_id).fee_bps, FEE_BPS);
     assert_eq!(w.sub.get_mandate(&new_id).fee_bps, 0);
@@ -2127,7 +2339,10 @@ fn index_pages_are_bounded_and_ordered() {
 
     let mut ids = soroban_sdk::Vec::<u64>::new(&w.env);
     for _ in 0..5 {
-        ids.push_back(w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>));
+        ids.push_back(
+            w.sub
+                .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>),
+        );
     }
 
     assert_eq!(
@@ -2156,8 +2371,12 @@ fn subscriber_mandate_summaries_returns_key_fields() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id1 = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let id2 = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id1 = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    let id2 = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let summaries = w.sub.subscriber_mandate_summaries(&user, &0, &10);
     assert_eq!(summaries.len(), 2);
@@ -2188,7 +2407,10 @@ fn subscriber_mandate_summaries_pages_are_bounded() {
     let user = w.subscriber(100_000);
     let mut ids = soroban_sdk::Vec::<u64>::new(&w.env);
     for _ in 0..5 {
-        ids.push_back(w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>));
+        ids.push_back(
+            w.sub
+                .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>),
+        );
     }
 
     let page1 = w.sub.subscriber_mandate_summaries(&user, &0, &2);
@@ -2224,7 +2446,8 @@ fn subscriber_mandate_summaries_page_size_is_capped() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     for _ in 0..(MAX_PAGE + 5) {
-        w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+        w.sub
+            .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     }
 
     assert_eq!(w.sub.subscriber_mandate_count(&user), MAX_PAGE + 5);
@@ -2248,9 +2471,15 @@ fn subscriber_mandate_summaries_reflects_status() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let active_id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let paused_id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let cancelled_id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let active_id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    let paused_id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    let cancelled_id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.set_paused(&user, &paused_id, &true);
     w.sub.cancel(&user, &cancelled_id);
@@ -2293,7 +2522,7 @@ fn subscriber_mandate_summaries_across_merchants() {
     let other_merchant = Address::generate(&w.env);
     let other_plan = w.registry.create_plan(
         &other_merchant,
-        &w.token,
+        &soroban_sdk::vec![&w.env, w.token.clone()],
         &PRICE,
         &MONTH,
         &String::from_str(&w.env, "Other Plan"),
@@ -2308,9 +2537,10 @@ fn subscriber_mandate_summaries_across_merchants() {
     );
     let user = w.subscriber(100_000);
 
-    w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
     w.sub
-        .subscribe(&user, &other_plan, &0, &0, &None::<Address>);
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    w.sub
+        .subscribe(&user, &other_plan, &w.token, &0, &0, &None::<Address>);
 
     let summaries = w.sub.subscriber_mandate_summaries(&user, &0, &10);
     assert_eq!(summaries.len(), 2);
@@ -2334,7 +2564,8 @@ fn index_page_size_is_capped() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     for _ in 0..(MAX_PAGE + 5) {
-        w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+        w.sub
+            .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     }
 
     assert_eq!(w.sub.merchant_mandate_count(&w.merchant), MAX_PAGE + 5);
@@ -2361,13 +2592,14 @@ fn subscribe_cost_does_not_grow_with_the_merchant_index() {
     let user = w.subscriber(100_000);
 
     for _ in 0..300 {
-        w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+        w.sub
+            .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     }
 
     let latecomer = w.subscriber(100_000);
     let id = w
         .sub
-        .subscribe(&latecomer, &plan_id, &0, &0, &None::<Address>);
+        .subscribe(&latecomer, &plan_id, &w.token, &0, &0, &None::<Address>);
     assert_eq!(w.sub.merchant_mandate_count(&w.merchant), 301);
     assert_eq!(
         w.sub.merchant_mandates(&w.merchant, &300, &1),
@@ -2384,7 +2616,9 @@ fn merchant_can_end_a_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     w.sub.end_mandate(&w.merchant, &id);
@@ -2406,7 +2640,9 @@ fn merchant_can_end_a_paused_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.set_paused(&user, &id, &true);
 
     w.sub.end_mandate(&w.merchant, &id);
@@ -2424,7 +2660,9 @@ fn only_the_mandates_merchant_can_end_it() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let stranger = Address::generate(&w.env);
     assert_eq!(
@@ -2445,14 +2683,18 @@ fn ending_a_finished_mandate_is_rejected() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
 
-    let cancelled = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let cancelled = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.cancel(&user, &cancelled);
     assert_eq!(
         w.sub.try_end_mandate(&w.merchant, &cancelled),
         Err(Ok(Error::MandateNotActive))
     );
 
-    let completed = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    let completed = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &1, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &completed);
     assert_eq!(
         w.sub.get_mandate(&completed).status,
@@ -2469,7 +2711,9 @@ fn end_mandate_requires_the_merchants_auth() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.end_mandate(&w.merchant, &id);
 
@@ -2483,7 +2727,9 @@ fn end_mandate_emits_an_event_naming_the_merchant() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     w.sub.end_mandate(&w.merchant, &id);
@@ -2536,7 +2782,7 @@ fn fee_paid_to_address() {
 
     let plan_id = registry.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &PRICE,
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
@@ -2553,7 +2799,7 @@ fn fee_paid_to_address() {
     StellarAssetClient::new(&env, &token).mint(&user, &100_000);
     vault.deposit(&user, &token, &100_000);
 
-    let id = sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = sub.subscribe(&user, &plan_id, &token, &0, &0, &None::<Address>);
     sub.charge(&keeper, &id);
 
     // The merchant should receive the price minus the fee.
@@ -2594,7 +2840,7 @@ fn charges_keep_vault_balances_in_sync() {
         expected[i] = 100_000;
         ids[i] = w
             .sub
-            .subscribe(&users[i], &plan_id, &0, &0, &None::<Address>);
+            .subscribe(&users[i], &plan_id, &w.token, &0, &0, &None::<Address>);
     }
 
     assert_vault_invariant(&w, &users, &expected);
@@ -2670,7 +2916,9 @@ fn pause_until_blocks_charging_until_the_date() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let until = w.env.ledger().timestamp() + MONTH;
     w.sub.pause_until(&user, &id, &until);
@@ -2709,7 +2957,9 @@ fn resume_after_pause_until_needs_no_transaction_from_the_subscriber() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let until = w.env.ledger().timestamp() + MONTH;
     w.sub.pause_until(&user, &id, &until);
@@ -2731,7 +2981,9 @@ fn manual_resume_still_works_while_a_date_is_set() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub
         .pause_until(&user, &id, &(w.env.ledger().timestamp() + MONTH));
     w.sub.set_paused(&user, &id, &false);
@@ -2755,7 +3007,9 @@ fn pause_until_can_extend_an_existing_pause() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let first = w.env.ledger().timestamp() + MONTH;
     let second = first + MONTH;
@@ -2779,7 +3033,9 @@ fn pause_until_rejects_a_date_that_has_passed() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     let now = w.env.ledger().timestamp();
 
     assert_eq!(
@@ -2799,7 +3055,9 @@ fn only_the_subscriber_of_a_mandate_can_pause_it_until_a_date() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     let stranger = Address::generate(&w.env);
     let until = w.env.ledger().timestamp() + MONTH;
 
@@ -2815,7 +3073,9 @@ fn pause_until_requires_the_subscriber_to_authorize() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     let until = w.env.ledger().timestamp() + MONTH;
     let attacker = Address::generate(&w.env);
 
@@ -2838,7 +3098,9 @@ fn pausing_a_cancelled_mandate_until_a_date_is_rejected() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.cancel(&user, &id);
 
     assert_eq!(
@@ -2859,8 +3121,10 @@ fn committed_per_period_normalises_mixed_periods() {
     let weekly = w.plan_amount(7_000, WEEK);
     let user = w.subscriber(1_000_000);
 
-    w.sub.subscribe(&user, &monthly, &0, &0, &None::<Address>);
-    w.sub.subscribe(&user, &weekly, &0, &0, &None::<Address>);
+    w.sub
+        .subscribe(&user, &monthly, &w.token, &0, &0, &None::<Address>);
+    w.sub
+        .subscribe(&user, &weekly, &w.token, &0, &0, &None::<Address>);
 
     // Hand calculation: 10_000 per month, plus 7_000 per week normalised to a
     // month: 7_000 * 2_592_000 / 604_800 = 30_000 exactly. Total 40_000.
@@ -2876,11 +3140,21 @@ fn committed_per_period_excludes_paused_and_finished_mandates() {
     let plan_id = w.plan();
     let user = w.subscriber(1_000_000);
 
-    let active = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let paused = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let cancelled = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let completed = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
-    let scheduled = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let active = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    let paused = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    let cancelled = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    let completed = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &1, &0, &None::<Address>);
+    let scheduled = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.set_paused(&user, &paused, &true);
     w.sub.cancel(&user, &cancelled);
@@ -2911,7 +3185,7 @@ fn committed_per_period_only_counts_this_subscriber_and_token() {
         .address();
     let other_plan = w.registry.create_plan(
         &w.merchant,
-        &other_token,
+        &soroban_sdk::vec![&w.env, other_token.clone()],
         &PRICE,
         &MONTH,
         &String::from_str(&w.env, "Other Token Plan"),
@@ -2927,11 +3201,12 @@ fn committed_per_period_only_counts_this_subscriber_and_token() {
 
     let user = w.subscriber(1_000_000);
     let stranger = w.subscriber(1_000_000);
-    w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
     w.sub
-        .subscribe(&user, &other_plan, &0, &0, &None::<Address>);
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub
-        .subscribe(&stranger, &plan_id, &0, &0, &None::<Address>);
+        .subscribe(&user, &other_plan, &other_token, &0, &0, &None::<Address>);
+    w.sub
+        .subscribe(&stranger, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert_eq!(w.sub.committed_per_period(&user, &w.token, &MONTH), PRICE);
     assert_eq!(
@@ -2964,7 +3239,9 @@ fn refund_returns_merchant_proceeds_to_the_subscriber() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     let received = merchant_receipt_per_charge();
@@ -2985,7 +3262,9 @@ fn over_refund_is_rejected() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     let received = merchant_receipt_per_charge();
@@ -3008,7 +3287,9 @@ fn refund_cap_grows_with_every_charge() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
     w.sub.charge(&w.keeper, &id);
@@ -3027,7 +3308,9 @@ fn refund_works_on_a_cancelled_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     w.sub.cancel(&user, &id);
 
@@ -3046,7 +3329,9 @@ fn only_the_merchant_of_a_mandate_can_refund() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     let stranger = Address::generate(&w.env);
 
@@ -3066,7 +3351,9 @@ fn refund_requires_the_merchants_auth() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     // Drop the blanket mock: the call must carry the merchant's own
@@ -3084,7 +3371,9 @@ fn set_seats_requires_the_subscriber_auth() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     let other_signer = Address::generate(&w.env);
 
     // Seats are what the subscriber is billed for, so only their own signature
@@ -3108,7 +3397,9 @@ fn refund_rejects_non_positive_amounts() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     assert_eq!(
@@ -3126,7 +3417,9 @@ fn refunding_a_never_charged_mandate_is_rejected() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // The merchant collected nothing, so there is nothing to refund.
     assert_eq!(
@@ -3140,7 +3433,9 @@ fn refund_event_links_the_refund_to_the_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     w.sub.refund(&w.merchant, &id, &1_234);
@@ -3173,7 +3468,7 @@ fn refund_cap_accounts_for_referral_fee() {
     let user = w.subscriber(100_000);
     let id = w
         .sub
-        .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &Some(referrer.clone()));
     let charge_result = w.sub.try_charge(&w.keeper, &id);
     assert!(charge_result.is_ok(), "charge failed: {charge_result:?}");
     let mandate = w.sub.get_mandate(&id);
@@ -3231,7 +3526,9 @@ fn refund_cap_accounts_for_keeper_tip() {
     // 2% keeper tip of the merchant's proceeds.
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     // Merchant receipt per charge: price - protocol_fee - tip
@@ -3297,7 +3594,7 @@ fn fee_to_contract_address_receives_the_fee() {
 
     let plan_id = registry.create_plan(
         &merchant,
-        &token,
+        &soroban_sdk::vec![&env, token.clone()],
         &PRICE,
         &MONTH,
         &String::from_str(&env, "Demo Plan"),
@@ -3314,7 +3611,7 @@ fn fee_to_contract_address_receives_the_fee() {
     minter.mint(&user, &100_000);
     vault.deposit(&user, &token, &50_000);
 
-    let id = sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = sub.subscribe(&user, &plan_id, &token, &0, &0, &None::<Address>);
     sub.charge(&keeper, &id);
 
     let expected_fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
@@ -3334,7 +3631,9 @@ fn cancel_requires_subscriber_auth() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let wrong_signer = Address::generate(&w.env);
     w.env.mock_auths(&[MockAuth {
@@ -3357,7 +3656,9 @@ fn set_paused_requires_subscriber_auth() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let wrong_signer = Address::generate(&w.env);
     w.env.mock_auths(&[MockAuth {
@@ -3440,7 +3741,7 @@ impl FailingTokenWorld<'_> {
     fn plan_with_keeper(&self, keeper_bps: u32) -> u64 {
         self.registry.create_plan(
             &self.merchant,
-            &self.token,
+            &soroban_sdk::vec![&self.env, self.token.clone()],
             &PRICE,
             &MONTH,
             &String::from_str(&self.env, "Demo Plan"),
@@ -3469,7 +3770,9 @@ fn charge_reverts_completely_when_token_fails_transfer() {
     let plan_id = w.plan_with_keeper(0);
     let user = w.subscriber(50_000);
 
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     assert_eq!(w.sub.get_mandate(&id).charges_made, 0);
 
     // Initial balances
@@ -3520,7 +3823,9 @@ fn charge_reverts_completely_when_fee_transfer_fails_after_merchant_debit() {
     let plan_id = w.plan_with_keeper(0);
     let user = w.subscriber(50_000);
 
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // Target failure specifically at the protocol fee recipient.
     // In `Subscription::charge`, merchant debit happens first, followed by fee debit.
@@ -3547,7 +3852,9 @@ fn charge_reverts_completely_when_keeper_tip_transfer_fails() {
     let plan_id = w.plan_with_keeper(KEEPER_BPS);
     let user = w.subscriber(50_000);
 
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // Target failure specifically at the keeper.
     // In `Subscription::charge`, merchant debit happens first, fee debit second, and tip debit third.
@@ -3574,7 +3881,9 @@ fn charge_with_fee_on_transfer_reverts_completely() {
     let w = failing_token_world();
     let plan_id = w.plan_with_keeper(0);
     let user = w.subscriber(50_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // The merchant would receive 9_900 for a 10_000 charge (the 1% fee is
     // deducted on transfer), so the vault rejects the debit and rolls the
@@ -3608,7 +3917,9 @@ fn refund_with_fee_on_transfer_reverts_and_leaves_the_mandate_unchanged() {
     let w = failing_token_world();
     let plan_id = w.plan_with_keeper(0);
     let user = w.subscriber(50_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     let fee = PRICE * i128::from(FEE_BPS) / BPS_DENOMINATOR;
@@ -3650,7 +3961,9 @@ fn upgrade_collects_the_prorated_difference() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // The first charge settles right away, so half of the period is left.
     w.sub.charge(&w.keeper, &id);
@@ -3679,7 +3992,9 @@ fn upgrade_rounds_the_difference_in_the_subscriber_s_favour() {
     let w = world();
     let plan_id = w.plan_amount(PRICE, WEEK);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     // Three days of a seven-day period: 4/7 of the difference, which is not a
@@ -3700,7 +4015,9 @@ fn upgrade_at_the_period_boundary_collects_nothing() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     // Exactly at the boundary the current period is over: the old price was
@@ -3720,7 +4037,9 @@ fn upgrade_right_after_a_charge_collects_the_full_difference() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     // The whole period is still ahead, so the whole difference is due.
@@ -3737,7 +4056,9 @@ fn a_downgrade_takes_effect_at_the_next_charge_and_refunds_nothing() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH / 2);
 
@@ -3762,7 +4083,9 @@ fn upgrade_rejects_a_plan_in_another_token() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let sac = w
         .env
@@ -3770,7 +4093,7 @@ fn upgrade_rejects_a_plan_in_another_token() {
     let other_token = sac.address();
     let other_plan = w.registry.create_plan(
         &w.merchant,
-        &other_token,
+        &soroban_sdk::vec![&w.env, other_token.clone()],
         &(PRICE * 2),
         &MONTH,
         &String::from_str(&w.env, "Other Token Plan"),
@@ -3796,12 +4119,14 @@ fn upgrade_rejects_a_plan_from_another_merchant() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let other_merchant = Address::generate(&w.env);
     let other_plan = w.registry.create_plan(
         &other_merchant,
-        &w.token,
+        &soroban_sdk::vec![&w.env, w.token.clone()],
         &(PRICE * 2),
         &MONTH,
         &String::from_str(&w.env, "Other Merchant Plan"),
@@ -3827,7 +4152,9 @@ fn upgrade_rejects_a_non_subscriber() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     let attacker = Address::generate(&w.env);
     let dearer = w.plan_amount(PRICE * 2, MONTH);
 
@@ -3843,7 +4170,9 @@ fn upgrade_requires_the_subscriber_to_authorize() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     let dearer = w.plan_amount(PRICE * 2, MONTH);
     let other_signer = Address::generate(&w.env);
 
@@ -3866,7 +4195,9 @@ fn upgrade_rejects_a_cancelled_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.cancel(&user, &id);
     let dearer = w.plan_amount(PRICE * 2, MONTH);
 
@@ -3881,7 +4212,9 @@ fn upgrade_rejects_an_inactive_plan() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let dearer = w.plan_amount(PRICE * 2, MONTH);
     w.registry.set_plan_active(&w.merchant, &dearer, &false);
@@ -3898,7 +4231,9 @@ fn upgrade_event_carries_the_old_and_the_new_terms() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH / 2);
 
@@ -3951,7 +4286,9 @@ fn mandate_updated_snapshot_event_emitted_on_all_state_changes() {
     };
 
     // 1. Subscribe
-    let id = w.sub.subscribe(&user, &plan_id, &2, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &2, &0, &None::<Address>);
     let snap1 = find_latest_snapshot(&w.env, id).expect("MandateUpdated emitted on subscribe");
     assert_eq!(snap1, w.sub.get_mandate(&id));
     assert_eq!(snap1.status, MandateStatus::Active);
@@ -4010,14 +4347,18 @@ fn mandate_updated_snapshot_event_emitted_on_all_state_changes() {
     assert_eq!(snap5.status, MandateStatus::Cancelled);
 
     // 9. End mandate (merchant) - test on a separate mandate
-    let id2 = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id2 = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.end_mandate(&w.merchant, &id2);
     let snap6 = find_latest_snapshot(&w.env, id2).expect("MandateUpdated emitted on end_mandate");
     assert_eq!(snap6, w.sub.get_mandate(&id2));
     assert_eq!(snap6.status, MandateStatus::Cancelled);
 
     // 10. Complete mandate on final charge
-    let id3 = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    let id3 = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &1, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id3);
     let snap7 =
         find_latest_snapshot(&w.env, id3).expect("MandateUpdated emitted on mandate completion");
@@ -4032,9 +4373,14 @@ fn a_total_spend_cap_completes_the_mandate_instead_of_overcharging() {
     let plan_id = w.plan();
     let user = w.subscriber(PRICE * 10);
     // Room for two charges exactly.
-    let id = w
-        .sub
-        .subscribe(&user, &plan_id, &0, &(PRICE * 2), &None::<Address>);
+    let id = w.sub.subscribe(
+        &user,
+        &plan_id,
+        &w.token,
+        &0,
+        &(PRICE * 2),
+        &None::<Address>,
+    );
 
     w.sub.charge(&w.keeper, &id);
     assert_eq!(w.sub.get_mandate(&id).total_spent, PRICE);
@@ -4057,9 +4403,14 @@ fn a_cap_the_next_charge_would_cross_stops_billing_short_of_it() {
     let plan_id = w.plan();
     let user = w.subscriber(PRICE * 10);
     // One and a half charges' worth: the second must not be settled at all.
-    let id = w
-        .sub
-        .subscribe(&user, &plan_id, &0, &(PRICE + PRICE / 2), &None::<Address>);
+    let id = w.sub.subscribe(
+        &user,
+        &plan_id,
+        &w.token,
+        &0,
+        &(PRICE + PRICE / 2),
+        &None::<Address>,
+    );
 
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
@@ -4074,7 +4425,9 @@ fn zero_means_no_total_spend_cap_and_a_negative_cap_is_rejected() {
     let plan_id = w.plan();
     let user = w.subscriber(PRICE * 10);
 
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
     w.sub.charge(&w.keeper, &id);
@@ -4084,7 +4437,7 @@ fn zero_means_no_total_spend_cap_and_a_negative_cap_is_rejected() {
 
     assert_eq!(
         w.sub
-            .try_subscribe(&user, &plan_id, &0, &-1, &None::<Address>,),
+            .try_subscribe(&user, &plan_id, &w.token, &0, &-1, &None::<Address>,),
         Err(Ok(Error::InvalidMaxTotal))
     );
 }
@@ -4114,10 +4467,18 @@ fn cancel_page_skips_finished_mandates_and_cancels_active_and_paused() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let active = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let paused = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let completed = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
-    let cancelled = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let active = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    let paused = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    let completed = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &1, &0, &None::<Address>);
+    let cancelled = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.set_paused(&user, &paused, &true);
     w.sub.charge(&w.keeper, &completed);
@@ -4146,7 +4507,8 @@ fn cancel_page_respects_the_page_cap_and_offset() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     for _ in 0..(MAX_PAGE + 2) {
-        w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+        w.sub
+            .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     }
 
     assert_eq!(w.sub.cancel_page(&user, &0, &u32::MAX), MAX_PAGE);
@@ -4164,7 +4526,8 @@ fn cancel_page_requires_the_subscriber_to_authorize() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     let other_signer = Address::generate(&w.env);
 
     w.env.mock_auths(&[MockAuth {
@@ -4186,7 +4549,9 @@ fn cancel_page_reports_no_reason() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert_eq!(w.sub.cancel_page(&user, &0, &1), 1);
 
@@ -4205,10 +4570,14 @@ fn due_mandates_filters_a_full_page() {
 
     for index in 0..(MAX_PAGE + 5) {
         let max_charges = u32::from(index == 1);
-        ids.push_back(
-            w.sub
-                .subscribe(&user, &plan_id, &max_charges, &0, &None::<Address>),
-        );
+        ids.push_back(w.sub.subscribe(
+            &user,
+            &plan_id,
+            &w.token,
+            &max_charges,
+            &0,
+            &None::<Address>,
+        ));
     }
 
     let paused_id = ids.get_unchecked(0);
@@ -4246,7 +4615,9 @@ fn due_mandates_agrees_with_is_due_and_needs_no_auth() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // A read needs no signature at all.
     w.env.set_auths(&[]);
@@ -4275,7 +4646,9 @@ fn charged_event_carries_the_token() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
 
@@ -4297,7 +4670,7 @@ fn subscribe_at_schedules_billing_from_the_start() {
 
     let id = w
         .sub
-        .subscribe_at(&user, &plan_id, &0, &0, &start, &None::<Address>);
+        .subscribe_at(&user, &plan_id, &w.token, &0, &0, &start, &None::<Address>);
 
     // Indexers see the start in Subscribed.next_charge, no follow-up read.
     // (Events are only visible from the last invocation, hence right here.)
@@ -4324,7 +4697,7 @@ fn charging_before_the_start_fails_with_not_due() {
     let start = w.env.ledger().timestamp() + MONTH;
     let id = w
         .sub
-        .subscribe_at(&user, &plan_id, &0, &0, &start, &None::<Address>);
+        .subscribe_at(&user, &plan_id, &w.token, &0, &0, &start, &None::<Address>);
 
     // The mandate exists but cannot settle before its start.
     assert_eq!(w.sub.try_charge(&w.keeper, &id), Err(Ok(Error::NotDue)));
@@ -4348,7 +4721,7 @@ fn subscribe_at_rejects_a_start_in_the_past() {
 
     assert_eq!(
         w.sub
-            .try_subscribe_at(&user, &plan_id, &0, &0, &past, &None::<Address>,),
+            .try_subscribe_at(&user, &plan_id, &w.token, &0, &0, &past, &None::<Address>,),
         Err(Ok(Error::InvalidStart))
     );
     // Nothing was opened: no mandate, no index entries.
@@ -4364,8 +4737,15 @@ fn subscribe_at_rejects_a_start_more_than_a_year_ahead() {
     let too_far = w.env.ledger().timestamp() + MAX_START_OFFSET + 1;
 
     assert_eq!(
-        w.sub
-            .try_subscribe_at(&user, &plan_id, &0, &0, &too_far, &None::<Address>,),
+        w.sub.try_subscribe_at(
+            &user,
+            &plan_id,
+            &w.token,
+            &0,
+            &0,
+            &too_far,
+            &None::<Address>,
+        ),
         Err(Ok(Error::InvalidStart))
     );
     assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
@@ -4380,7 +4760,7 @@ fn subscribe_at_accepts_a_start_one_year_from_now() {
 
     let id = w
         .sub
-        .subscribe_at(&user, &plan_id, &0, &0, &start, &None::<Address>);
+        .subscribe_at(&user, &plan_id, &w.token, &0, &0, &start, &None::<Address>);
 
     // The boundary itself is allowed: exactly one year ahead.
     assert_eq!(w.sub.get_mandate(&id).next_charge, start);
@@ -4402,14 +4782,14 @@ fn subscribe_at_requires_the_subscriber_to_authorize() {
         invoke: &MockAuthInvoke {
             contract: &w.sub.address,
             fn_name: "subscribe_at",
-            args: (&user, &plan_id, &0u32, &0i128, &start).into_val(&w.env),
+            args: (&user, &plan_id, &w.token, &0u32, &0i128, &start).into_val(&w.env),
             sub_invokes: &[],
         },
     }]);
 
     assert!(w
         .sub
-        .try_subscribe_at(&user, &plan_id, &0, &0, &start, &None::<Address>,)
+        .try_subscribe_at(&user, &plan_id, &w.token, &0, &0, &start, &None::<Address>,)
         .is_err());
     assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
 }
@@ -4422,7 +4802,9 @@ fn subscribe_is_subscribe_at_now() {
     let user = w.subscriber(100_000);
     let now = w.env.ledger().timestamp();
 
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert_eq!(w.sub.get_mandate(&id).next_charge, now);
     assert!(w.sub.is_due(&id));
@@ -4433,7 +4815,9 @@ fn second_charge_before_period_elapses_is_rejected() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     assert!(!w.sub.is_due(&id));
@@ -4453,14 +4837,16 @@ fn plan_cutoff_stops_new_subscriptions_but_not_existing_mandates() {
 
     // One second before the cutoff the plan is still open.
     w.env.ledger().set_timestamp(cutoff - 1);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // At the cutoff itself it accepts no one new.
     w.env.ledger().set_timestamp(cutoff);
     let late = w.subscriber(100_000);
     assert_eq!(
         w.sub
-            .try_subscribe(&late, &plan_id, &0, &0, &None::<Address>,),
+            .try_subscribe(&late, &plan_id, &w.token, &0, &0, &None::<Address>,),
         Err(Ok(Error::PlanInactive))
     );
 
@@ -4485,10 +4871,18 @@ fn plan_mandate_index_lists_subscribers_and_pages() {
     let carol = w.subscriber(100_000);
     let dave = w.subscriber(100_000);
 
-    let m1 = w.sub.subscribe(&alice, &a, &0, &0, &None::<Address>);
-    let m2 = w.sub.subscribe(&bob, &a, &0, &0, &None::<Address>);
-    let m3 = w.sub.subscribe(&carol, &a, &0, &0, &None::<Address>);
-    let m4 = w.sub.subscribe(&dave, &b, &0, &0, &None::<Address>);
+    let m1 = w
+        .sub
+        .subscribe(&alice, &a, &w.token, &0, &0, &None::<Address>);
+    let m2 = w
+        .sub
+        .subscribe(&bob, &a, &w.token, &0, &0, &None::<Address>);
+    let m3 = w
+        .sub
+        .subscribe(&carol, &a, &w.token, &0, &0, &None::<Address>);
+    let m4 = w
+        .sub
+        .subscribe(&dave, &b, &w.token, &0, &0, &None::<Address>);
 
     // Per-plan isolation, oldest first.
     assert_eq!(w.sub.plan_mandate_count(&a), 3);
@@ -4530,9 +4924,9 @@ fn subscribe_with_deposit_funds_and_subscribes_in_one_call() {
 
     // No prior deposit: the single call moves the tokens into the vault and
     // opens the mandate.
-    let id = w
-        .sub
-        .subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>);
+    let id =
+        w.sub
+            .subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &40_000, &None::<Address>);
 
     assert_eq!(w.vault.balance(&user, &w.token), 40_000);
     assert_eq!(w.token_client.balance(&user), 60_000);
@@ -4554,7 +4948,7 @@ fn subscribe_with_deposit_aborts_atomically_when_the_deposit_fails() {
 
     assert!(w
         .sub
-        .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>,)
+        .try_subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &40_000, &None::<Address>,)
         .is_err());
 
     // Nothing was subscribed and nothing was credited.
@@ -4563,7 +4957,9 @@ fn subscribe_with_deposit_aborts_atomically_when_the_deposit_fails() {
     assert_eq!(w.token_client.balance(&user), 1_000);
 
     // No mandate id was burned: the next subscribe still gets id 1.
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     assert_eq!(id, 1);
 }
 
@@ -4582,6 +4978,7 @@ fn one_subscriber_signature_covers_the_nested_vault_deposit() {
             args: (
                 &user,
                 &plan_id,
+                &w.token,
                 &0u32,
                 &0i128,
                 &40_000i128,
@@ -4602,9 +4999,9 @@ fn one_subscriber_signature_covers_the_nested_vault_deposit() {
         },
     }]);
 
-    let id = w
-        .sub
-        .subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>);
+    let id =
+        w.sub
+            .subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &40_000, &None::<Address>);
     assert_eq!(w.vault.balance(&user, &w.token), 40_000);
     assert_eq!(w.sub.get_mandate(&id).subscriber, user);
 }
@@ -4624,6 +5021,7 @@ fn without_the_nested_auth_entry_the_deposit_is_not_covered() {
             args: (
                 &user,
                 &plan_id,
+                &w.token,
                 &0u32,
                 &0i128,
                 &40_000i128,
@@ -4636,7 +5034,7 @@ fn without_the_nested_auth_entry_the_deposit_is_not_covered() {
 
     assert!(w
         .sub
-        .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>,)
+        .try_subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &40_000, &None::<Address>,)
         .is_err());
     assert_eq!(w.sub.plan_mandate_count(&plan_id), 0);
     assert_eq!(w.vault.balance(&user, &w.token), 0);
@@ -4659,6 +5057,7 @@ fn subscribe_with_deposit_requires_the_subscriber_to_authorize() {
             args: (
                 &user,
                 &plan_id,
+                &w.token,
                 &0u32,
                 &0i128,
                 &40_000i128,
@@ -4671,7 +5070,7 @@ fn subscribe_with_deposit_requires_the_subscriber_to_authorize() {
 
     assert!(w
         .sub
-        .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>,)
+        .try_subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &40_000, &None::<Address>,)
         .is_err());
     assert_eq!(w.sub.plan_mandate_count(&plan_id), 0);
     assert_eq!(w.vault.balance(&user, &w.token), 0);
@@ -4689,8 +5088,15 @@ fn subscribe_with_deposit_rolls_the_deposit_back_when_the_plan_is_expired() {
     w.env.ledger().set_timestamp(cutoff);
 
     assert_eq!(
-        w.sub
-            .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>,),
+        w.sub.try_subscribe_with_deposit(
+            &user,
+            &plan_id,
+            &w.token,
+            &0,
+            &0,
+            &40_000,
+            &None::<Address>,
+        ),
         Err(Ok(Error::PlanInactive))
     );
     assert_eq!(w.vault.balance(&user, &w.token), 0);
@@ -4707,7 +5113,9 @@ fn a_spend_limit_blocks_the_charge_atomically() {
     // "Never debit more than the price minus one unit in this window."
     w.vault
         .set_spend_limit(&user, &w.token, &(PRICE - 1), &MONTH);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert!(w.sub.try_charge(&w.keeper, &id).is_err());
 
@@ -4752,7 +5160,7 @@ fn referral_share_is_paid_to_the_referrer() {
     let user = w.subscriber(100_000);
     let id = w
         .sub
-        .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &Some(referrer.clone()));
 
     w.sub.charge(&w.keeper, &id);
 
@@ -4782,7 +5190,7 @@ fn subscribing_without_a_referrer_pays_no_referral() {
     let plan_id = w.plan_full(0, REFERRAL_BPS, None);
     let referrer = Address::generate(&w.env);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None);
+    let id = w.sub.subscribe(&user, &plan_id, &w.token, &0, &0, &None);
 
     w.sub.charge(&w.keeper, &id);
 
@@ -4800,7 +5208,7 @@ fn zero_referral_bps_disables_the_referral() {
     let user = w.subscriber(100_000);
     let id = w
         .sub
-        .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &Some(referrer.clone()));
 
     w.sub.charge(&w.keeper, &id);
 
@@ -4822,7 +5230,7 @@ fn referral_split_loses_at_most_one_stroop() {
     for amount in [101i128, 107, 3_333, 7_777, 99_999] {
         let plan_id = w.registry.create_plan(
             &w.merchant,
-            &w.token,
+            &soroban_sdk::vec![&w.env, w.token.clone()],
             &amount,
             &MONTH,
             &String::from_str(&w.env, "Odd Plan"),
@@ -4839,7 +5247,7 @@ fn referral_split_loses_at_most_one_stroop() {
         let user = w.subscriber(funding);
         let id = w
             .sub
-            .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+            .subscribe(&user, &plan_id, &w.token, &0, &0, &Some(referrer.clone()));
         w.sub.charge(&w.keeper, &id);
 
         let fee = amount * i128::from(FEE_BPS) / BPS_DENOMINATOR;
@@ -4873,7 +5281,9 @@ fn charged_event_reports_the_referral_amount() {
     let plan_id = w.plan_full(0, REFERRAL_BPS, None);
     let referrer = Address::generate(&w.env);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &Some(referrer));
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &Some(referrer));
 
     w.sub.charge(&w.keeper, &id);
 
@@ -4890,7 +5300,7 @@ fn referral_and_keeper_tip_split_the_merchant_share_together() {
     let user = w.subscriber(100_000);
     let id = w
         .sub
-        .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &Some(referrer.clone()));
 
     w.sub.charge(&w.keeper, &id);
 
@@ -4915,7 +5325,7 @@ fn charges_are_paid_to_the_payout_address() {
     let treasury = Address::generate(&w.env);
     let plan_id = w.plan_full(0, 0, Some(treasury.clone()));
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None);
+    let id = w.sub.subscribe(&user, &plan_id, &w.token, &0, &0, &None);
 
     // The mandate carries both: the merchant for management, the payout for
     // settlement.
@@ -4958,7 +5368,7 @@ fn plan_transfer_does_not_redirect_open_mandates() {
     let plan_id = w.plan_full(0, 0, Some(treasury.clone()));
     let buyer = Address::generate(&w.env);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None);
+    let id = w.sub.subscribe(&user, &plan_id, &w.token, &0, &0, &None);
 
     // The plan changes hands.
     w.registry.propose_plan_owner(&w.merchant, &plan_id, &buyer);
@@ -4983,7 +5393,7 @@ fn plan_transfer_does_not_redirect_open_mandates() {
     assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Cancelled);
 
     // A mandate opened after the transfer belongs to the new owner.
-    let new_id = w.sub.subscribe(&user, &plan_id, &0, &0, &None);
+    let new_id = w.sub.subscribe(&user, &plan_id, &w.token, &0, &0, &None);
     assert_eq!(w.sub.get_mandate(&new_id).merchant, buyer.clone());
     w.sub.end_mandate(&buyer, &new_id);
     assert_eq!(w.sub.get_mandate(&new_id).status, MandateStatus::Cancelled);
@@ -5013,7 +5423,9 @@ fn refund_requires_the_merchants_signature() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     // Drop the blanket mock: the call must carry the merchant's own
@@ -5034,14 +5446,16 @@ fn subscribe_rejects_a_full_plan() {
     let b = w.subscriber(100_000);
     let rejected = w.subscriber(100_000);
 
-    w.sub.subscribe(&a, &plan_id, &0, &0, &None::<Address>);
-    w.sub.subscribe(&b, &plan_id, &0, &0, &None::<Address>);
+    w.sub
+        .subscribe(&a, &plan_id, &w.token, &0, &0, &None::<Address>);
+    w.sub
+        .subscribe(&b, &plan_id, &w.token, &0, &0, &None::<Address>);
     assert_eq!(w.sub.plan_subscriber_count(&plan_id), 2);
 
     // The plan is full: no mandate is opened and the counter is unchanged.
     assert_eq!(
         w.sub
-            .try_subscribe(&rejected, &plan_id, &0, &0, &None::<Address>),
+            .try_subscribe(&rejected, &plan_id, &w.token, &0, &0, &None::<Address>),
         Err(Ok(Error::PlanFull))
     );
     assert_eq!(w.sub.plan_subscriber_count(&plan_id), 2);
@@ -5053,12 +5467,14 @@ fn cancelling_frees_a_seat_on_a_full_plan() {
     let w = world();
     let plan_id = w.plan_with_cap(1);
     let first = w.subscriber(100_000);
-    let id = w.sub.subscribe(&first, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&first, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let second = w.subscriber(100_000);
     assert_eq!(
         w.sub
-            .try_subscribe(&second, &plan_id, &0, &0, &None::<Address>),
+            .try_subscribe(&second, &plan_id, &w.token, &0, &0, &None::<Address>),
         Err(Ok(Error::PlanFull))
     );
 
@@ -5066,7 +5482,8 @@ fn cancelling_frees_a_seat_on_a_full_plan() {
     assert_eq!(w.sub.plan_subscriber_count(&plan_id), 0);
 
     // The freed seat is immediately usable.
-    w.sub.subscribe(&second, &plan_id, &0, &0, &None::<Address>);
+    w.sub
+        .subscribe(&second, &plan_id, &w.token, &0, &0, &None::<Address>);
     assert_eq!(w.sub.plan_subscriber_count(&plan_id), 1);
 }
 
@@ -5075,13 +5492,16 @@ fn ending_a_mandate_frees_a_seat() {
     let w = world();
     let plan_id = w.plan_with_cap(1);
     let first = w.subscriber(100_000);
-    let id = w.sub.subscribe(&first, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&first, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.end_mandate(&w.merchant, &id);
     assert_eq!(w.sub.plan_subscriber_count(&plan_id), 0);
 
     let second = w.subscriber(100_000);
-    w.sub.subscribe(&second, &plan_id, &0, &0, &None::<Address>);
+    w.sub
+        .subscribe(&second, &plan_id, &w.token, &0, &0, &None::<Address>);
     assert_eq!(w.sub.plan_subscriber_count(&plan_id), 1);
 }
 
@@ -5091,14 +5511,17 @@ fn completion_frees_a_seat() {
     let plan_id = w.plan_with_cap(1);
     let first = w.subscriber(100_000);
     // Capped at one charge: the mandate completes on the first charge.
-    let id = w.sub.subscribe(&first, &plan_id, &1, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&first, &plan_id, &w.token, &1, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Completed);
     assert_eq!(w.sub.plan_subscriber_count(&plan_id), 0);
 
     let second = w.subscriber(100_000);
-    w.sub.subscribe(&second, &plan_id, &0, &0, &None::<Address>);
+    w.sub
+        .subscribe(&second, &plan_id, &w.token, &0, &0, &None::<Address>);
     assert_eq!(w.sub.plan_subscriber_count(&plan_id), 1);
 }
 
@@ -5107,7 +5530,9 @@ fn paused_mandates_still_hold_their_seat() {
     let w = world();
     let plan_id = w.plan_with_cap(1);
     let first = w.subscriber(100_000);
-    let id = w.sub.subscribe(&first, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&first, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.set_paused(&first, &id, &true);
 
     // Paused is still open: resuming later must keep working, so the seat is
@@ -5116,7 +5541,7 @@ fn paused_mandates_still_hold_their_seat() {
     let second = w.subscriber(100_000);
     assert_eq!(
         w.sub
-            .try_subscribe(&second, &plan_id, &0, &0, &None::<Address>),
+            .try_subscribe(&second, &plan_id, &w.token, &0, &0, &None::<Address>),
         Err(Ok(Error::PlanFull))
     );
 
@@ -5132,7 +5557,8 @@ fn unlimited_plans_accept_any_number_of_subscribers() {
     let user = w.subscriber(1_000_000);
 
     for _ in 0..5 {
-        w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+        w.sub
+            .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     }
     // The count still tracks open mandates so an indexer can read it, but
     // nothing is ever rejected for being full.
@@ -5144,7 +5570,9 @@ fn subscriber_can_raise_the_cap_of_an_open_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(1_000_000);
-    let id = w.sub.subscribe(&user, &plan_id, &2, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &2, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
@@ -5173,7 +5601,9 @@ fn only_the_subscriber_can_change_the_cap() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &2, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &2, &0, &None::<Address>);
 
     // A stranger fails the ownership check even though auth is mocked.
     let attacker = Address::generate(&w.env);
@@ -5194,7 +5624,9 @@ fn a_different_signer_cannot_change_the_cap() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &2, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &2, &0, &None::<Address>);
     let attacker = Address::generate(&w.env);
 
     // The attacker passes the subscriber's address as the argument, but the
@@ -5218,7 +5650,9 @@ fn lowering_the_cap_to_charges_made_completes_the_mandate() {
     let w = world();
     let plan_id = w.plan_with_cap(1);
     let user = w.subscriber(1_000_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>); // open-ended
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>); // open-ended
 
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
@@ -5260,7 +5694,9 @@ fn a_cap_below_charges_made_is_rejected() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(1_000_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
@@ -5284,7 +5720,9 @@ fn raising_the_cap_works_on_a_paused_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(1_000_000);
-    let id = w.sub.subscribe(&user, &plan_id, &2, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &2, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     assert_eq!(w.sub.get_mandate(&id).charges_made, 1);
@@ -5307,7 +5745,9 @@ fn changing_the_cap_of_a_cancelled_mandate_is_rejected() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.cancel(&user, &id);
     assert_eq!(
@@ -5321,7 +5761,9 @@ fn admin_can_upgrade_and_state_written_before_survives() {
     let w = world();
     let plan_id = w.plan_with_cap(4);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &2, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &2, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     let wasm_hash = w.env.deployer().upload_contract_wasm(UPGRADE_WASM);
@@ -5495,7 +5937,9 @@ fn paused_plan_blocks_charges_until_resumed() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(PRICE);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.registry
         .set_plan_charges_paused(&w.merchant, &plan_id, &true);
@@ -5542,10 +5986,10 @@ fn pausing_one_plan_leaves_other_plans_chargeable() {
     let user = w.subscriber(PRICE * 2);
     let paused = w
         .sub
-        .subscribe(&user, &paused_plan, &0, &0, &None::<Address>);
+        .subscribe(&user, &paused_plan, &w.token, &0, &0, &None::<Address>);
     let running = w
         .sub
-        .subscribe(&user, &running_plan, &0, &0, &None::<Address>);
+        .subscribe(&user, &running_plan, &w.token, &0, &0, &None::<Address>);
 
     w.registry
         .set_plan_charges_paused(&w.merchant, &paused_plan, &true);
@@ -5569,7 +6013,9 @@ fn pausing_a_plan_does_not_block_new_subscriptions() {
     // Pausing charges is not deactivation: a subscriber can still sign up, and
     // the new mandate waits for the merchant to resume.
     let user = w.subscriber(PRICE);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
     assert_eq!(
         w.sub.try_charge(&w.keeper, &id),
@@ -5587,7 +6033,9 @@ fn upgrading_into_a_paused_plan_is_rejected() {
     let old_plan = w.plan_priced(PRICE);
     let new_plan = w.plan_priced(PRICE * 2);
     let user = w.subscriber(PRICE * 3);
-    let id = w.sub.subscribe(&user, &old_plan, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &old_plan, &w.token, &0, &0, &None::<Address>);
 
     w.registry
         .set_plan_charges_paused(&w.merchant, &new_plan, &true);
@@ -5623,12 +6071,12 @@ fn grace_view_uses_the_window_frozen_at_subscribe_time() {
     // the merchant later configures one.
     let before = w
         .sub
-        .subscribe(&w.merchant, &plan_id, &0, &0, &None::<Address>);
+        .subscribe(&w.merchant, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.registry
         .set_plan_grace_period(&w.merchant, &plan_id, &3_600);
     let after = w
         .sub
-        .subscribe(&w.merchant, &plan_id, &0, &0, &None::<Address>);
+        .subscribe(&w.merchant, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert_eq!(w.sub.mandate_grace_period(&before), 0);
     assert_eq!(w.sub.mandate_grace_period(&after), 3_600);
@@ -5644,7 +6092,7 @@ fn grace_view_starts_at_the_due_time_and_expires_at_the_boundary() {
         .set_plan_grace_period(&w.merchant, &plan_id, &3_600);
     let id = w
         .sub
-        .subscribe(&w.merchant, &plan_id, &0, &0, &None::<Address>);
+        .subscribe(&w.merchant, &plan_id, &w.token, &0, &0, &None::<Address>);
     let due = w.sub.get_mandate(&id).next_charge;
 
     // Due now: the window has just opened.
@@ -5666,7 +6114,9 @@ fn successful_charges_leave_the_grace_view_false() {
     w.registry
         .set_plan_grace_period(&w.merchant, &plan_id, &3_600);
     let user = w.subscriber(PRICE);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     assert!(!w.sub.is_in_grace_period(&id));
@@ -5680,8 +6130,12 @@ fn cancelled_and_paused_mandates_are_not_in_grace() {
         .set_plan_grace_period(&w.merchant, &plan_id, &3_600);
     let user = Address::generate(&w.env);
     let other = Address::generate(&w.env);
-    let cancelled = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let paused = w.sub.subscribe(&other, &plan_id, &0, &0, &None::<Address>);
+    let cancelled = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    let paused = w
+        .sub
+        .subscribe(&other, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.cancel(&user, &cancelled);
     w.sub.set_paused(&other, &paused, &true);
@@ -5710,7 +6164,7 @@ fn grace_view_is_a_pure_read() {
         .set_plan_grace_period(&w.merchant, &plan_id, &3_600);
     let id = w
         .sub
-        .subscribe(&w.merchant, &plan_id, &0, &0, &None::<Address>);
+        .subscribe(&w.merchant, &plan_id, &w.token, &0, &0, &None::<Address>);
     let before = w.sub.get_mandate(&id);
 
     assert!(w.sub.is_in_grace_period(&id));
@@ -5745,7 +6199,9 @@ fn charge_failed_events(env: &Env) -> std::vec::Vec<soroban_sdk::xdr::ContractEv
 fn lapsed_mandate(w: &World) -> (Address, u64) {
     let plan_id = w.plan();
     let user = w.subscriber(PRICE);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
     (user, id)
@@ -5836,7 +6292,9 @@ fn a_charge_that_would_succeed_cannot_be_flagged() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(PRICE);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     assert_eq!(
         w.sub.try_flag_failed_charge(&id),
@@ -5852,7 +6310,9 @@ fn a_charge_that_is_not_due_cannot_be_flagged() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(PRICE);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     // Vault is empty, but nothing is owed until next_charge.
@@ -5867,15 +6327,20 @@ fn inactive_mandates_cannot_be_flagged() {
     let plan_id = w.plan();
 
     let cancelled_user = Address::generate(&w.env);
-    let cancelled = w
-        .sub
-        .subscribe(&cancelled_user, &plan_id, &0, &0, &None::<Address>);
+    let cancelled = w.sub.subscribe(
+        &cancelled_user,
+        &plan_id,
+        &w.token,
+        &0,
+        &0,
+        &None::<Address>,
+    );
     w.sub.cancel(&cancelled_user, &cancelled);
 
     let paused_user = Address::generate(&w.env);
     let paused = w
         .sub
-        .subscribe(&paused_user, &plan_id, &0, &0, &None::<Address>);
+        .subscribe(&paused_user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.set_paused(&paused_user, &paused, &true);
 
     assert_eq!(
@@ -5899,9 +6364,14 @@ fn a_mandate_at_its_spend_cap_cannot_be_flagged() {
     let user = w.subscriber(PRICE);
     // Room for one and a half charges: the second would cross the cap, so
     // charge refuses it on caps grounds, not funds.
-    let id = w
-        .sub
-        .subscribe(&user, &plan_id, &0, &(PRICE + PRICE / 2), &None::<Address>);
+    let id = w.sub.subscribe(
+        &user,
+        &plan_id,
+        &w.token,
+        &0,
+        &(PRICE + PRICE / 2),
+        &None::<Address>,
+    );
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
 
@@ -5916,7 +6386,9 @@ fn a_spend_limit_shortfall_counts_as_a_failed_charge() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(10 * PRICE);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     // Funded, but the subscriber's own spend limit is below the price.
     w.vault
         .set_spend_limit(&user, &w.token, &(PRICE - 1), &MONTH);
@@ -5961,8 +6433,12 @@ fn a_reserve_pays_its_own_mandate_and_starves_no_other() {
     let plan_id = w.plan();
     // Enough for one charge plus a little.
     let user = w.subscriber(PRICE + 100);
-    let reserved = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let other = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let reserved = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    let other = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.vault.set_reserve(&user, &w.token, &reserved, &PRICE);
 
     // The other mandate sees only the unreserved 100 and fails...
@@ -5989,7 +6465,7 @@ fn a_tipped_referred_charge_draws_every_leg_from_the_reserve() {
     let user = w.subscriber(PRICE);
     let id = w
         .sub
-        .subscribe(&user, &plan_id, &0, &0, &Some(referrer.clone()));
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &Some(referrer.clone()));
     // Everything is reserved: only this mandate's own legs may spend it.
     w.vault.set_reserve(&user, &w.token, &id, &PRICE);
 
@@ -6008,7 +6484,9 @@ fn an_upgrade_proration_can_draw_on_the_mandates_reserve() {
     let cheap = w.plan_priced(PRICE);
     let dear = w.plan_priced(PRICE * 2);
     let user = w.subscriber(PRICE * 2);
-    let id = w.sub.subscribe(&user, &cheap, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &cheap, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     // The remaining PRICE is all reserved for this mandate.
     w.vault.set_reserve(&user, &w.token, &id, &PRICE);
@@ -6040,9 +6518,9 @@ fn allowlist_off_by_default_leaves_subscribe_open() {
     let plan_id = w.plan();
     let user = wallet_holder(&w, 100_000);
 
-    let id = w
-        .sub
-        .subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>);
+    let id =
+        w.sub
+            .subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &40_000, &None::<Address>);
     assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Active);
 }
 
@@ -6055,7 +6533,7 @@ fn enabling_the_allowlist_blocks_subscribing_with_an_unlisted_token() {
 
     assert!(w
         .sub
-        .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>)
+        .try_subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &40_000, &None::<Address>)
         .is_err());
     // The vault refused for the allowlist, not some other reason.
     assert_eq!(
@@ -6080,9 +6558,9 @@ fn an_allowlisted_token_subscribes_while_the_allowlist_is_on() {
     w.vault.set_allowlist_enabled(&true);
     w.vault.set_token_allowed(&w.token, &true);
 
-    let id = w
-        .sub
-        .subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>);
+    let id =
+        w.sub
+            .subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &40_000, &None::<Address>);
     assert_eq!(w.vault.balance(&user, &w.token), 40_000);
     assert_eq!(w.sub.get_mandate(&id).subscriber, user);
 }
@@ -6096,15 +6574,15 @@ fn disabling_the_allowlist_restores_open_subscribe() {
     w.vault.set_allowlist_enabled(&true);
     assert!(w
         .sub
-        .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>)
+        .try_subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &40_000, &None::<Address>)
         .is_err());
 
     // The token was never listed: turning the allowlist off alone reopens it.
     w.vault.set_allowlist_enabled(&false);
     assert!(!w.vault.token_allowed(&w.token));
-    let id = w
-        .sub
-        .subscribe_with_deposit(&user, &plan_id, &0, &0, &40_000, &None::<Address>);
+    let id =
+        w.sub
+            .subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &40_000, &None::<Address>);
     assert_eq!(id, 1);
     assert_eq!(w.vault.balance(&user, &w.token), 40_000);
 }
@@ -6119,7 +6597,15 @@ fn toggling_the_allowlist_repeatedly_gates_subscribe_each_time() {
         let blocked = wallet_holder(&w, 100_000);
         assert!(
             w.sub
-                .try_subscribe_with_deposit(&blocked, &plan_id, &0, &0, &PRICE, &None::<Address>)
+                .try_subscribe_with_deposit(
+                    &blocked,
+                    &plan_id,
+                    &w.token,
+                    &0,
+                    &0,
+                    &PRICE,
+                    &None::<Address>
+                )
                 .is_err(),
             "round {round}: allowlist on must block"
         );
@@ -6127,7 +6613,7 @@ fn toggling_the_allowlist_repeatedly_gates_subscribe_each_time() {
         w.vault.set_allowlist_enabled(&false);
         let open = wallet_holder(&w, 100_000);
         w.sub
-            .subscribe_with_deposit(&open, &plan_id, &0, &0, &PRICE, &None::<Address>);
+            .subscribe_with_deposit(&open, &plan_id, &w.token, &0, &0, &PRICE, &None::<Address>);
     }
     // Exactly the three open-window sign-ups went through.
     assert_eq!(w.sub.plan_mandate_count(&plan_id), 3);
@@ -6141,16 +6627,30 @@ fn delisting_a_token_blocks_new_subscribers_but_existing_mandates_keep_billing()
     w.vault.set_token_allowed(&w.token, &true);
 
     let existing = wallet_holder(&w, 100_000);
-    let id =
-        w.sub
-            .subscribe_with_deposit(&existing, &plan_id, &0, &0, &(2 * PRICE), &None::<Address>);
+    let id = w.sub.subscribe_with_deposit(
+        &existing,
+        &plan_id,
+        &w.token,
+        &0,
+        &0,
+        &(2 * PRICE),
+        &None::<Address>,
+    );
 
     w.vault.set_token_allowed(&w.token, &false);
 
     let newcomer = wallet_holder(&w, 100_000);
     assert!(w
         .sub
-        .try_subscribe_with_deposit(&newcomer, &plan_id, &0, &0, &PRICE, &None::<Address>)
+        .try_subscribe_with_deposit(
+            &newcomer,
+            &plan_id,
+            &w.token,
+            &0,
+            &0,
+            &PRICE,
+            &None::<Address>
+        )
         .is_err());
 
     // The allowlist gates new funds only: the open mandate still settles from
@@ -6170,7 +6670,9 @@ fn allowlist_gates_new_funds_not_balances_already_held() {
     w.vault.set_allowlist_enabled(&true);
 
     // A plain subscribe deposits nothing, so it is not gated...
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     // ...but adding funds for the next charge is.
     assert_eq!(
@@ -6200,7 +6702,7 @@ fn a_non_admin_cannot_enable_the_allowlist_to_block_subscribers() {
     assert!(!w.vault.allowlist_enabled());
     let user = wallet_holder(&w, 100_000);
     w.sub
-        .subscribe_with_deposit(&user, &plan_id, &0, &0, &PRICE, &None::<Address>);
+        .subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &PRICE, &None::<Address>);
 }
 
 #[test]
@@ -6226,7 +6728,7 @@ fn a_non_admin_cannot_disable_the_allowlist_to_reopen_subscribe() {
     let user = wallet_holder(&w, 100_000);
     assert!(w
         .sub
-        .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &PRICE, &None::<Address>)
+        .try_subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &PRICE, &None::<Address>)
         .is_err());
 }
 
@@ -6253,7 +6755,7 @@ fn a_non_admin_cannot_allowlist_a_token_to_subscribe() {
     assert!(!w.vault.token_allowed(&w.token));
     assert!(w
         .sub
-        .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &PRICE, &None::<Address>)
+        .try_subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &PRICE, &None::<Address>)
         .is_err());
 }
 
@@ -6286,23 +6788,32 @@ fn missing_plans_are_typed_errors_on_every_entry_point() {
     for missing in [0, 7, u64::MAX] {
         assert_eq!(
             w.sub
-                .try_subscribe(&user, &missing, &0, &0, &None::<Address>),
+                .try_subscribe(&user, &missing, &w.token, &0, &0, &None::<Address>),
             Err(Ok(Error::PlanNotFound))
         );
         assert_eq!(
             w.sub
-                .try_subscribe_at(&user, &missing, &0, &0, &now, &None::<Address>,),
+                .try_subscribe_at(&user, &missing, &w.token, &0, &0, &now, &None::<Address>,),
             Err(Ok(Error::PlanNotFound))
         );
         assert_eq!(
-            w.sub
-                .try_subscribe_with_deposit(&user, &missing, &0, &0, &100, &None::<Address>,),
+            w.sub.try_subscribe_with_deposit(
+                &user,
+                &missing,
+                &w.token,
+                &0,
+                &0,
+                &100,
+                &None::<Address>,
+            ),
             Err(Ok(Error::PlanNotFound))
         );
     }
 
     let plan_id = w.plan();
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     for missing in [0, 7, u64::MAX] {
         assert_eq!(
             w.sub.try_upgrade(&user, &id, &missing),
@@ -6317,7 +6828,9 @@ fn underfunded_charge_is_a_typed_vault_error() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(PRICE);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
 
@@ -6340,12 +6853,12 @@ fn subscribe_with_deposit_maps_vault_failures_to_a_typed_error() {
 
     assert_eq!(
         w.sub
-            .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &100, &None::<Address>),
+            .try_subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &100, &None::<Address>),
         Err(Ok(Error::VaultCallFailed))
     );
     assert_eq!(
         w.sub
-            .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &0, &None::<Address>),
+            .try_subscribe_with_deposit(&user, &plan_id, &w.token, &0, &0, &0, &None::<Address>),
         Err(Ok(Error::VaultCallFailed))
     );
     assert_eq!(w.sub.next_mandate_id(), 1);
@@ -6360,7 +6873,7 @@ fn upgrade_reports_vault_failure_as_a_typed_error() {
     let start = w.env.ledger().timestamp() + MONTH;
     let id = w
         .sub
-        .subscribe_at(&user, &plan_id, &0, &0, &start, &None::<Address>);
+        .subscribe_at(&user, &plan_id, &w.token, &0, &0, &start, &None::<Address>);
 
     assert_eq!(
         w.sub.try_upgrade(&user, &id, &dearer),
@@ -6379,7 +6892,7 @@ fn extreme_schedules_return_typed_errors() {
     for start in [0, now - 1, now + MAX_START_OFFSET + 1, u64::MAX] {
         assert_eq!(
             w.sub
-                .try_subscribe_at(&user, &plan_id, &0, &0, &start, &None::<Address>),
+                .try_subscribe_at(&user, &plan_id, &w.token, &0, &0, &start, &None::<Address>),
             Err(Ok(Error::InvalidStart))
         );
     }
@@ -6387,7 +6900,7 @@ fn extreme_schedules_return_typed_errors() {
     let long_plan = w.plan_amount(PRICE, u64::MAX);
     let id = w
         .sub
-        .subscribe(&user, &long_plan, &u32::MAX, &0, &None::<Address>);
+        .subscribe(&user, &long_plan, &w.token, &u32::MAX, &0, &None::<Address>);
     assert_eq!(
         w.sub.try_estimated_end(&id),
         Err(Ok(Error::ScheduleOverflow))
@@ -6399,7 +6912,9 @@ fn deterministic_random_queries_never_reach_a_host_trap() {
     let w = world();
     let user = w.subscriber(PRICE);
     let plan_id = w.plan();
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     let now = w.env.ledger().timestamp();
     let mut seed = 0x5eed_1234_abcd_9876u64;
 
@@ -6414,6 +6929,7 @@ fn deterministic_random_queries_never_reach_a_host_trap() {
         assert_typed_error(w.sub.try_subscribe_at(
             &user,
             &plan,
+            &w.token,
             &max_charges,
             &max_total,
             &start,
@@ -6463,11 +6979,17 @@ fn view_world() -> (World<'static>, Address, u64, u64, u64, u64) {
     let w = world();
     let plan_id = w.plan_with_cap(5);
     let user = w.subscriber(1_000_000);
-    let active = w.sub.subscribe(&user, &plan_id, &3, &0, &None::<Address>);
+    let active = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &3, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &active);
-    let paused = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let paused = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.set_paused(&user, &paused, &true);
-    let cancelled = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let cancelled = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.cancel(&user, &cancelled);
     w.advance(MONTH);
     (w, user, plan_id, active, paused, cancelled)
@@ -6524,7 +7046,7 @@ fn every_subscription_view_leaves_storage_events_and_auth_untouched() {
         s.plan_subscriber_count(&plan_id)
     });
     assert_read_only(env, "plan_committed_revenue", || {
-        s.plan_committed_revenue(&plan_id)
+        s.plan_committed_revenue(&plan_id, &w.token)
     });
 
     // Pages past the end and unknown keys read nothing and write nothing.
@@ -6585,7 +7107,7 @@ fn subscription_views_need_no_signature() {
         s.committed_per_period(&user, &w.token, &MONTH)
     });
     assert_read_only(env, "plan_committed_revenue (unsigned)", || {
-        s.plan_committed_revenue(&plan_id)
+        s.plan_committed_revenue(&plan_id, &w.token)
     });
     assert_read_only(env, "admin (unsigned)", || s.admin());
 }
@@ -6653,12 +7175,14 @@ fn lowering_a_bounded_cap_to_charges_made_ends_the_mandate() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(1_000_000);
-    let id = w.sub.subscribe(&user, &plan_id, &5, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &5, &0, &None::<Address>);
 
     w.sub.charge(&w.keeper, &id);
     w.advance(MONTH);
     w.sub.charge(&w.keeper, &id);
-    assert_eq!(w.sub.plan_committed_revenue(&plan_id), PRICE);
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id, &w.token), PRICE);
 
     // Five months agreed, two paid: "make that two" ends it on the spot.
     w.sub.set_max_charges(&user, &id, &2);
@@ -6671,7 +7195,7 @@ fn lowering_a_bounded_cap_to_charges_made_ends_the_mandate() {
     assert_eq!(m.charges_made, 2);
     // A completed mandate no longer counts towards the merchant's revenue,
     // nor is it offered to keepers.
-    assert_eq!(w.sub.plan_committed_revenue(&plan_id), 0);
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id, &w.token), 0);
     w.advance(MONTH);
     assert!(!w.sub.is_due(&id));
     assert!(w.sub.due_mandates(&w.merchant, &0, &10).is_empty());
@@ -6686,7 +7210,9 @@ fn lowering_the_cap_of_a_paused_mandate_to_charges_made_ends_it() {
     let w = world();
     let plan_id = w.plan_with_cap(1);
     let user = w.subscriber(1_000_000);
-    let id = w.sub.subscribe(&user, &plan_id, &4, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &4, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     w.sub.set_paused(&user, &id, &true);
 
@@ -6708,7 +7234,9 @@ fn a_mandate_ended_by_lowering_its_cap_cannot_be_reopened() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(1_000_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     w.sub.set_max_charges(&user, &id, &1);
     assert_eq!(w.sub.get_mandate(&id).status, MandateStatus::Completed);
@@ -6733,17 +7261,21 @@ fn a_seat_freed_by_lowering_the_cap_admits_the_next_subscriber() {
     let plan_id = w.plan_with_cap(1);
     let first = w.subscriber(1_000_000);
     let second = w.subscriber(1_000_000);
-    let id = w.sub.subscribe(&first, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&first, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     assert_eq!(
         w.sub
-            .try_subscribe(&second, &plan_id, &0, &0, &None::<Address>),
+            .try_subscribe(&second, &plan_id, &w.token, &0, &0, &None::<Address>),
         Err(Ok(Error::PlanFull))
     );
 
     w.sub.set_max_charges(&first, &id, &1);
-    let next = w.sub.subscribe(&second, &plan_id, &0, &0, &None::<Address>);
+    let next = w
+        .sub
+        .subscribe(&second, &plan_id, &w.token, &0, &0, &None::<Address>);
     assert_eq!(w.sub.get_mandate(&next).status, MandateStatus::Active);
     assert_eq!(w.sub.plan_subscriber_count(&plan_id), 1);
 }
@@ -6753,14 +7285,16 @@ fn lowering_below_charges_made_is_rejected_and_changes_nothing() {
     let w = world();
     let plan_id = w.plan_with_cap(3);
     let user = w.subscriber(1_000_000);
-    let id = w.sub.subscribe(&user, &plan_id, &6, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &6, &0, &None::<Address>);
     for _ in 0..3 {
         w.sub.charge(&w.keeper, &id);
         w.advance(MONTH);
     }
     let before = w.sub.get_mandate(&id);
     let seats = w.sub.plan_subscriber_count(&plan_id);
-    let revenue = w.sub.plan_committed_revenue(&plan_id);
+    let revenue = w.sub.plan_committed_revenue(&plan_id, &w.token);
 
     // Every value strictly between 0 (unlimited) and charges_made is refused.
     for cap in 1..before.charges_made {
@@ -6771,7 +7305,7 @@ fn lowering_below_charges_made_is_rejected_and_changes_nothing() {
     }
     assert_eq!(w.sub.get_mandate(&id), before);
     assert_eq!(w.sub.plan_subscriber_count(&plan_id), seats);
-    assert_eq!(w.sub.plan_committed_revenue(&plan_id), revenue);
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id, &w.token), revenue);
     assert!(w.sub.is_due(&id));
 }
 
@@ -6780,7 +7314,9 @@ fn only_the_subscriber_can_end_a_mandate_by_lowering_its_cap() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(1_000_000);
-    let id = w.sub.subscribe(&user, &plan_id, &4, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &4, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
 
     // The merchant and a stranger fail the ownership check...
@@ -6817,7 +7353,9 @@ fn lowering_the_cap_of_an_already_ended_mandate_is_rejected() {
     let user = w.subscriber(1_000_000);
 
     // Ended by the merchant.
-    let ended = w.sub.subscribe(&user, &plan_id, &4, &0, &None::<Address>);
+    let ended = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &4, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &ended);
     w.sub.end_mandate(&w.merchant, &ended);
     assert_eq!(
@@ -6826,7 +7364,9 @@ fn lowering_the_cap_of_an_already_ended_mandate_is_rejected() {
     );
 
     // Completed naturally by its last charge.
-    let done = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    let done = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &1, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &done);
     assert_eq!(w.sub.get_mandate(&done).status, MandateStatus::Completed);
     assert_eq!(
@@ -6879,7 +7419,9 @@ fn fuzz_mandate_and_plan_ids_are_never_reused_after_ending() {
                 let user = &users[pick % users.len()];
                 let plan_id = plans[pick % plans.len()];
                 let cap = u32::try_from((roll >> 8) % 3).unwrap(); // 0 = open-ended
-                let id = w.sub.subscribe(user, &plan_id, &cap, &0, &None::<Address>);
+                let id = w
+                    .sub
+                    .subscribe(user, &plan_id, &w.token, &cap, &0, &None::<Address>);
                 assert_eq!(id, next_before, "ids are issued in order");
                 assert!(
                     opened.iter().all(|(seen, _, _)| *seen != id),
@@ -6939,15 +7481,21 @@ fn fuzz_mandate_and_plan_ids_are_never_reused_after_ending() {
             7 => {
                 if let Some(&retired) = retired_plans.get(pick % retired_plans.len().max(1)) {
                     assert_eq!(
-                        w.sub
-                            .try_subscribe(&users[0], &retired, &0, &0, &None::<Address>),
+                        w.sub.try_subscribe(
+                            &users[0],
+                            &retired,
+                            &w.token,
+                            &0,
+                            &0,
+                            &None::<Address>
+                        ),
                         Err(Ok(Error::PlanInactive))
                     );
                 }
                 let unknown_plan = w.registry.next_plan_id() + 7;
                 assert!(w
                     .sub
-                    .try_subscribe(&users[1], &unknown_plan, &0, &0, &None::<Address>)
+                    .try_subscribe(&users[1], &unknown_plan, &w.token, &0, &0, &None::<Address>)
                     .is_err());
                 if !opened.is_empty() {
                     let (id, _, _) = opened[pick % opened.len()].clone();
@@ -6994,7 +7542,7 @@ fn fuzz_mandate_and_plan_ids_are_never_reused_after_ending() {
     // A fresh mandate after all that churn still gets a never-seen id.
     let fresh = w
         .sub
-        .subscribe(&users[0], &plans[0], &0, &0, &None::<Address>);
+        .subscribe(&users[0], &plans[0], &w.token, &0, &0, &None::<Address>);
     assert_eq!(fresh, next);
 }
 
@@ -7006,7 +7554,9 @@ fn estimated_end_detail_reports_timestamp_ledger_and_periods() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     w.env.ledger().set_sequence_number(1_000);
-    let id = w.sub.subscribe(&user, &plan_id, &4, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &4, &0, &None::<Address>);
 
     let detail = w.sub.estimated_end_detail(&id).unwrap();
     let expected = 1_000_000 + 3 * MONTH;
@@ -7025,7 +7575,9 @@ fn estimated_end_detail_rounds_partial_periods_up() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &3, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &3, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     // Half a period in: two charges left, the last 1.5 periods away.
     w.env.ledger().set_timestamp(1_000_000 + MONTH / 2);
@@ -7041,7 +7593,9 @@ fn estimated_end_detail_is_none_for_open_ended_mandates() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     assert_eq!(w.sub.estimated_end_detail(&id), None);
 }
 
@@ -7051,7 +7605,9 @@ fn estimated_end_detail_after_completion_points_at_the_past() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     w.env.ledger().set_sequence_number(500);
-    let id = w.sub.subscribe(&user, &plan_id, &1, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &1, &0, &None::<Address>);
     w.sub.charge(&w.keeper, &id);
     w.env.ledger().set_timestamp(1_000_000 + 5 * MONTH);
     w.env.ledger().set_sequence_number(900);
@@ -7074,7 +7630,9 @@ fn estimated_end_detail_errors_for_missing_and_overflowing_mandates() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     w.env.ledger().set_timestamp(u64::MAX - MONTH + 1);
-    let id = w.sub.subscribe(&user, &plan_id, &2, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &2, &0, &None::<Address>);
     assert_eq!(
         w.sub.try_estimated_end_detail(&id),
         Err(Ok(Error::ScheduleOverflow))
@@ -7089,7 +7647,9 @@ fn charge_reports_schedule_overflow_when_next_due_date_exceeds_u64() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     w.env.ledger().set_timestamp(u64::MAX - MONTH + 1);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // Regression: this used to surface as AmountOverflow.
     assert_eq!(
@@ -7107,7 +7667,9 @@ fn charge_succeeds_at_the_last_representable_due_date() {
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
     w.env.ledger().set_timestamp(u64::MAX - MONTH);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let result = w.sub.charge(&w.keeper, &id);
     assert_eq!(result.next_charge, u64::MAX);
@@ -7118,7 +7680,9 @@ fn huge_period_plan_overflows_on_charge_not_on_subscribe() {
     let w = world();
     let long_plan = w.plan_amount(PRICE, u64::MAX);
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &long_plan, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &long_plan, &w.token, &0, &0, &None::<Address>);
     assert_eq!(
         w.sub.try_charge(&w.keeper, &id),
         Err(Ok(Error::ScheduleOverflow))
@@ -7174,19 +7738,33 @@ fn protocol_pause_blocks_every_subscribe_entry_point() {
     let next_id = w.sub.next_mandate_id();
     assert_eq!(
         w.sub
-            .try_subscribe(&user, &plan_id, &0, &0, &None::<Address>),
+            .try_subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>),
         Err(Ok(Error::ProtocolPaused))
     );
     let now = w.env.ledger().timestamp();
     assert_eq!(
-        w.sub
-            .try_subscribe_at(&user, &plan_id, &0, &0, &(now + WEEK), &None::<Address>),
+        w.sub.try_subscribe_at(
+            &user,
+            &plan_id,
+            &w.token,
+            &0,
+            &0,
+            &(now + WEEK),
+            &None::<Address>
+        ),
         Err(Ok(Error::ProtocolPaused))
     );
     let vault_before = w.vault.balance(&user, &w.token);
     assert_eq!(
-        w.sub
-            .try_subscribe_with_deposit(&user, &plan_id, &0, &0, &PRICE, &None::<Address>),
+        w.sub.try_subscribe_with_deposit(
+            &user,
+            &plan_id,
+            &w.token,
+            &0,
+            &0,
+            &PRICE,
+            &None::<Address>
+        ),
         Err(Ok(Error::ProtocolPaused))
     );
     // Nothing was opened or deposited.
@@ -7200,7 +7778,9 @@ fn protocol_pause_blocks_charge_and_keeps_the_mandate_due() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     let before = w.sub.get_mandate(&id);
 
     w.sub.set_protocol_paused(&true);
@@ -7227,7 +7807,9 @@ fn protocol_pause_blocks_plan_upgrades() {
     let plan_id = w.plan();
     let other_plan = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.set_protocol_paused(&true);
     assert_eq!(
@@ -7242,7 +7824,9 @@ fn protocol_pause_preserves_exits_cancel_and_withdraw() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     w.sub.set_protocol_paused(&true);
 
@@ -7309,9 +7893,15 @@ fn extend_merchant_mandates_ttl_bumps_open_mandates_and_skips_closed_ones() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(1_000_000);
-    let open = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let paused = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
-    let cancelled = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let open = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    let paused = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
+    let cancelled = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.set_paused(&user, &paused, &true);
     w.sub.cancel(&user, &cancelled);
 
@@ -7347,7 +7937,8 @@ fn extend_merchant_mandates_ttl_pages_and_bounds() {
     let plan_id = w.plan();
     let user = w.subscriber(1_000_000);
     for _ in 0..3 {
-        w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+        w.sub
+            .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     }
     assert_eq!(w.sub.extend_merchant_mandates_ttl(&w.merchant, &1, &1), 1);
     assert_eq!(w.sub.extend_merchant_mandates_ttl(&w.merchant, &2, &10), 1);
@@ -7367,7 +7958,8 @@ fn extend_merchant_mandates_ttl_needs_no_auth_and_works_while_paused() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    w.sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.sub.set_protocol_paused(&true);
     w.env.set_auths(&[]);
     assert_eq!(w.sub.extend_merchant_mandates_ttl(&w.merchant, &0, &10), 1);
@@ -7385,7 +7977,8 @@ fn extend_merchant_mandates_ttl_budget_beats_one_call_per_mandate() {
     let plan_id = w.plan();
     let user = w.subscriber(10_000_000);
     for _ in 0..N {
-        w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+        w.sub
+            .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     }
 
     w.env.cost_estimate().budget().reset_default();
@@ -7410,7 +8003,9 @@ fn hot_mandate_ttl_is_extended_on_view_access() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(1_000_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     let before = w.sub.get_mandate(&id);
 
     let seq = w.env.ledger().sequence();
@@ -7431,7 +8026,9 @@ fn hot_mandate_ttl_is_extended_on_failed_charge_access() {
     // An unfunded subscriber gives `flag_failed_charge` a real failure to
     // report without rewriting the mandate itself.
     let user = Address::generate(&w.env);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let seq = w.env.ledger().sequence();
     w.env
@@ -7449,7 +8046,9 @@ fn fresh_and_missing_mandates_are_untouched_by_access() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(1_000_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     let ttl = persistent_ttl(&w, &DataKey::Mandate(id));
     assert_eq!(ttl, PERSIST_BUMP);
@@ -7470,7 +8069,9 @@ fn subscription_call_budgets_stay_within_committed_snapshots() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.env.cost_estimate().budget().reset_default();
     w.sub.charge(&w.keeper, &id);
     let budget = w.env.cost_estimate().budget();
@@ -7483,7 +8084,9 @@ fn subscription_call_budgets_stay_within_committed_snapshots() {
     let w = world();
     let plan_id = w.plan();
     let user = w.subscriber(100_000);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.env.mock_auths(&[]);
     w.env.cost_estimate().budget().reset_default();
     assert!(w.sub.try_charge(&w.keeper, &id).is_err());
@@ -7497,7 +8100,9 @@ fn subscription_call_budgets_stay_within_committed_snapshots() {
     let w = world();
     let plan_id = w.plan();
     let user = Address::generate(&w.env);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
     w.env.cost_estimate().budget().reset_default();
     assert!(w.sub.try_charge(&w.keeper, &id).is_err());
     let budget = w.env.cost_estimate().budget();
@@ -7512,7 +8117,7 @@ fn subscription_call_budgets_stay_within_committed_snapshots() {
     let user = w.subscriber(100_000);
     let id = w
         .sub
-        .subscribe(&user, &plan_id, &0, &0, &Some(w.keeper.clone()));
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &Some(w.keeper.clone()));
     w.env.mock_auths(&[]);
     w.env.cost_estimate().budget().reset_default();
     let simulation = w.sub.simulate_charge(&w.keeper, &id);
@@ -7658,7 +8263,7 @@ mod interleaved_mandates {
         let plan_a = w.plan_amount(AMOUNT_A, MONTH);
         let plan_b = w.registry.create_plan(
             &merchant_b,
-            &w.token,
+            &soroban_sdk::vec![&w.env, w.token.clone()],
             &AMOUNT_B,
             &MONTH,
             &String::from_str(&w.env, "Plan B"),
@@ -7673,8 +8278,12 @@ mod interleaved_mandates {
         );
 
         let user = w.subscriber(funding);
-        let a = w.sub.subscribe(&user, &plan_a, &0, &0, &None::<Address>);
-        let b = w.sub.subscribe(&user, &plan_b, &0, &0, &None::<Address>);
+        let a = w
+            .sub
+            .subscribe(&user, &plan_a, &w.token, &0, &0, &None::<Address>);
+        let b = w
+            .sub
+            .subscribe(&user, &plan_b, &w.token, &0, &0, &None::<Address>);
 
         let p = Pair {
             w,
@@ -8463,12 +9072,14 @@ mod deterministic_ids {
         }
 
         r.mandate_noise(noise, p1);
-        let m4 = r.w.sub.subscribe_at(&u2, &p3, &0, &0, &(T0 + WEEK), &None);
+        let m4 =
+            r.w.sub
+                .subscribe_at(&u2, &p3, &r.w.token, &0, &0, &(T0 + WEEK), &None);
         r.mandates.push(m4);
         r.mandate_noise(noise, p1);
         let m5 =
             r.w.sub
-                .subscribe_with_deposit(&u1, &p4, &0, &0, &10_000, &None);
+                .subscribe_with_deposit(&u1, &p4, &r.w.token, &0, &0, &10_000, &None);
         r.mandates.push(m5);
         if noise == Noise::Failures {
             r.full_plan_failures(p4);
@@ -8504,7 +9115,7 @@ mod deterministic_ids {
         fn params(&self, amount: i128, max_subscribers: u32) -> PlanParams {
             let env = &self.w.env;
             PlanParams {
-                token: self.w.token.clone(),
+                accepted_tokens: soroban_sdk::vec![env, self.w.token.clone()],
                 amount,
                 period: MONTH,
                 name: String::from_str(env, "Plan"),
@@ -8530,7 +9141,7 @@ mod deterministic_ids {
             let env = &self.w.env;
             (
                 merchant,
-                &self.w.token,
+                &soroban_sdk::vec![env, self.w.token.clone()],
                 &amount,
                 &period,
                 &String::from_str(env, "Plan"),
@@ -8555,7 +9166,7 @@ mod deterministic_ids {
             let env = &self.w.env;
             self.w.registry.try_create_plan(
                 merchant,
-                &self.w.token,
+                &soroban_sdk::vec![env, self.w.token.clone()],
                 &amount,
                 &period,
                 &String::from_str(env, "Plan"),
@@ -8579,7 +9190,7 @@ mod deterministic_ids {
         fn try_subscribe(&self, user: &Address, plan_id: u64) -> TryId<Error> {
             self.w
                 .sub
-                .try_subscribe(user, &plan_id, &0, &0, &None::<Address>)
+                .try_subscribe(user, &plan_id, &self.w.token, &0, &0, &None::<Address>)
         }
 
         fn subscribe(&mut self, user: &Address, plan_id: u64) -> u64 {
@@ -8692,21 +9303,29 @@ mod deterministic_ids {
             });
             self.consumes_no_id("a deposit-and-subscribe on a missing plan", |r| {
                 assert_eq!(
-                    r.w.sub
-                        .try_subscribe_with_deposit(u2, &MISSING_PLAN, &0, &0, &10_000, &None),
+                    r.w.sub.try_subscribe_with_deposit(
+                        u2,
+                        &MISSING_PLAN,
+                        &r.w.token,
+                        &0,
+                        &0,
+                        &10_000,
+                        &None
+                    ),
                     Err(Ok(Error::PlanNotFound))
                 );
             });
             self.consumes_no_id("a backdated mandate", |r| {
                 assert_eq!(
                     r.w.sub
-                        .try_subscribe_at(u2, &open_plan, &0, &0, &(T0 - 1), &None),
+                        .try_subscribe_at(u2, &open_plan, &r.w.token, &0, &0, &(T0 - 1), &None),
                     Err(Ok(Error::InvalidStart))
                 );
             });
             self.consumes_no_id("a negative spend cap", |r| {
                 assert_eq!(
-                    r.w.sub.try_subscribe(u2, &open_plan, &0, &-1, &None),
+                    r.w.sub
+                        .try_subscribe(u2, &open_plan, &r.w.token, &0, &-1, &None),
                     Err(Ok(Error::InvalidMaxTotal))
                 );
             });
@@ -8716,6 +9335,7 @@ mod deterministic_ids {
                     r.w.sub.try_subscribe_with_deposit(
                         u2,
                         &open_plan,
+                        &r.w.token,
                         &0,
                         &0,
                         &(10 * FUNDING),
@@ -8747,8 +9367,9 @@ mod deterministic_ids {
                 let t = &r.w.token_client;
                 let (vault, wallet) = (r.w.vault.balance(u2, &r.w.token), t.balance(u2));
                 assert_eq!(
-                    r.w.sub
-                        .try_subscribe_with_deposit(u2, &closed, &0, &0, &10_000, &None),
+                    r.w.sub.try_subscribe_with_deposit(
+                        u2, &closed, &r.w.token, &0, &0, &10_000, &None
+                    ),
                     Err(Ok(Error::PlanInactive))
                 );
                 assert_eq!(r.w.vault.balance(u2, &r.w.token), vault);
@@ -8800,29 +9421,39 @@ mod deterministic_ids {
             let sub = &self.w.sub.address;
             self.consumes_no_id("an unsigned mandate", |r| {
                 r.w.env.mock_auths(&[]);
-                assert!(matches!(r.try_subscribe(u1, open_plan), Err(Err(_))));
+                assert!(matches!(r.try_subscribe(u1, open_plan,), Err(Err(_))));
             });
             self.consumes_no_id("a mandate signed by someone else", |r| {
-                let args = (u1, &open_plan, &0u32, &0i128, &None::<Address>).into_val(&r.w.env);
+                let args = (u1, &open_plan, &r.w.token, &0u32, &0i128, &None::<Address>)
+                    .into_val(&r.w.env);
                 r.signed_by(&r.outsider, sub, "subscribe", args);
-                assert!(matches!(r.try_subscribe(u1, open_plan), Err(Err(_))));
+                assert!(matches!(r.try_subscribe(u1, open_plan,), Err(Err(_))));
             });
             self.consumes_no_id("a scheduled mandate signed by someone else", |r| {
                 let start = T0 + WEEK;
-                let args =
-                    (u1, &open_plan, &0u32, &0i128, &start, &None::<Address>).into_val(&r.w.env);
+                let args = (
+                    u1,
+                    &open_plan,
+                    &r.w.token,
+                    &0u32,
+                    &0i128,
+                    &start,
+                    &None::<Address>,
+                )
+                    .into_val(&r.w.env);
                 r.signed_by(&r.outsider, sub, "subscribe_at", args);
                 assert!(matches!(
                     r.w.sub
-                        .try_subscribe_at(u1, &open_plan, &0, &0, &start, &None),
+                        .try_subscribe_at(u1, &open_plan, &r.w.token, &0, &0, &start, &None),
                     Err(Err(_))
                 ));
             });
             self.consumes_no_id("an unsigned deposit-and-subscribe", |r| {
                 r.w.env.mock_auths(&[]);
                 assert!(matches!(
-                    r.w.sub
-                        .try_subscribe_with_deposit(u1, &open_plan, &0, &0, &10_000, &None),
+                    r.w.sub.try_subscribe_with_deposit(
+                        u1, &open_plan, &r.w.token, &0, &0, &10_000, &None
+                    ),
                     Err(Err(_))
                 ));
             });
@@ -9006,14 +9637,14 @@ mod deterministic_ids {
         let sub = &r.w.sub.address;
         let plan = GOLDEN_PLANS[0];
         let args: soroban_sdk::Vec<Val> =
-            (u1, &plan, &0u32, &0i128, &None::<Address>).into_val(env);
+            (u1, &plan, &r.w.token, &0u32, &0i128, &None::<Address>).into_val(env);
 
         env.mock_auths(&[]);
-        assert!(matches!(r.try_subscribe(u1, plan), Err(Err(_))));
+        assert!(matches!(r.try_subscribe(u1, plan,), Err(Err(_))));
         r.signed_by(&r.outsider, sub, "subscribe", args.clone());
-        assert!(matches!(r.try_subscribe(u1, plan), Err(Err(_))));
+        assert!(matches!(r.try_subscribe(u1, plan,), Err(Err(_))));
         r.signed_by(u1, sub, "subscribe", args.clone());
-        assert_eq!(r.try_subscribe(u1, plan), Ok(Ok(GOLDEN_MANDATES[0].0)));
+        assert_eq!(r.try_subscribe(u1, plan,), Ok(Ok(GOLDEN_MANDATES[0].0)));
         assert_eq!(
             env.auths(),
             std::vec![(
@@ -9053,11 +9684,13 @@ fn maximum_amount_charge_is_safe_and_reports_max_committed_revenue() {
     let user = Address::generate(&w.env);
     w.minter.mint(&user, &i128::MAX);
     w.vault.deposit(&user, &w.token, &i128::MAX);
-    let id = w.sub.subscribe(&user, &plan_id, &0, &0, &None::<Address>);
+    let id = w
+        .sub
+        .subscribe(&user, &plan_id, &w.token, &0, &0, &None::<Address>);
 
     // Same-period normalisation must return the amount itself, not overflow
     // to a zero contribution and leave the revenue cache empty.
-    assert_eq!(w.sub.plan_committed_revenue(&plan_id), i128::MAX);
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id, &w.token), i128::MAX);
 
     let result = w.sub.charge(&w.keeper, &id);
     assert_eq!(result.merchant_amount, i128::MAX);
@@ -9068,7 +9701,7 @@ fn maximum_amount_charge_is_safe_and_reports_max_committed_revenue() {
     assert_eq!(w.token_client.balance(&w.merchant), i128::MAX);
     assert_eq!(w.token_client.balance(&w.vault.address), 0);
     assert_eq!(w.sub.get_mandate(&id).total_spent, i128::MAX);
-    assert_eq!(w.sub.plan_committed_revenue(&plan_id), i128::MAX);
+    assert_eq!(w.sub.plan_committed_revenue(&plan_id, &w.token), i128::MAX);
 
     // A second charge would make total_spent + amount exceed i128::MAX. It
     // must fail with a typed error and leave the settled mandate untouched.
@@ -9089,9 +9722,14 @@ fn maximum_counts_seats_and_pause_are_stored_without_wrapping() {
     let w = world();
     let plan_id = w.plan_with_cap(u32::MAX);
     let user = w.subscriber(PRICE * 4);
-    let id = w
-        .sub
-        .subscribe(&user, &plan_id, &u32::MAX, &i128::MAX, &None::<Address>);
+    let id = w.sub.subscribe(
+        &user,
+        &plan_id,
+        &w.token,
+        &u32::MAX,
+        &i128::MAX,
+        &None::<Address>,
+    );
 
     let mandate = w.sub.get_mandate(&id);
     assert_eq!(mandate.max_charges, u32::MAX);
@@ -9118,8 +9756,14 @@ fn mandate_id_counter_exhaustion_is_a_typed_error_without_state_changes() {
     set_next_mandate_id(&w, u64::MAX);
 
     assert_eq!(
-        w.sub
-            .try_subscribe(&user, &plan_id, &u32::MAX, &i128::MAX, &None::<Address>),
+        w.sub.try_subscribe(
+            &user,
+            &plan_id,
+            &w.token,
+            &u32::MAX,
+            &i128::MAX,
+            &None::<Address>
+        ),
         Err(Ok(Error::AmountOverflow))
     );
     assert_eq!(w.sub.next_mandate_id(), u64::MAX);
@@ -9139,7 +9783,14 @@ fn maximum_value_subscribe_requires_the_subscribers_auth() {
 
     assert!(w
         .sub
-        .try_subscribe(&user, &plan_id, &u32::MAX, &i128::MAX, &None::<Address>)
+        .try_subscribe(
+            &user,
+            &plan_id,
+            &w.token,
+            &u32::MAX,
+            &i128::MAX,
+            &None::<Address>
+        )
         .is_err());
     assert_eq!(w.sub.next_mandate_id(), 1);
     assert_eq!(w.sub.subscriber_mandate_count(&user), 0);
@@ -9166,10 +9817,18 @@ impl EntryPointBatch {
         subscription: Address,
         subscriber: Address,
         plan_id: u64,
+        token: Address,
         keeper: Address,
     ) -> u64 {
         let client = SubscriptionClient::new(&env, &subscription);
-        let id = client.subscribe(&subscriber, &plan_id, &0u32, &0i128, &None::<Address>);
+        let id = client.subscribe(
+            &subscriber,
+            &plan_id,
+            &token,
+            &0u32,
+            &0i128,
+            &None::<Address>,
+        );
         let _ = client.charge(&keeper, &id);
         client.cancel(&subscriber, &id);
         id
@@ -9187,7 +9846,7 @@ fn events_follow_call_order_across_a_multi_entry_point_transaction() {
     let batch_addr = w.env.register(EntryPointBatch, ());
     let batch = EntryPointBatchClient::new(&w.env, &batch_addr);
 
-    let id = batch.subscribe_charge_cancel(&w.sub_id, &user, &plan_id, &w.keeper);
+    let id = batch.subscribe_charge_cancel(&w.sub_id, &user, &plan_id, &w.token, &w.keeper);
 
     // Read the log before any further call: `events().all()` reports the most
     // recent invocation, and a view call would replace the batch's log.
